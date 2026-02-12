@@ -60,9 +60,26 @@ impl Tool for SpawnWorkerTool {
     type Output = SpawnWorkerOutput;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let rc = &self.state.deps.runtime_config;
+        let browser_enabled = rc.browser_config.load().enabled;
+        let web_search_enabled = rc.brave_search_key.load().is_some();
+
+        let mut tools_list = vec!["shell", "file", "exec"];
+        if browser_enabled {
+            tools_list.push("browser");
+        }
+        if web_search_enabled {
+            tools_list.push("web_search");
+        }
+
+        let description = format!(
+            "Spawn an independent worker process with {} tools. The worker only sees the task description you provide — no conversation history.",
+            tools_list.join(", ")
+        );
+
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Spawn an independent worker process with shell, file, and exec tools. The worker only sees the task description you provide — no conversation history.".to_string(),
+            description,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

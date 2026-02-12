@@ -240,6 +240,14 @@ impl Channel {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(&skills_prompt);
         }
+
+        // Inject dynamic worker capabilities so the channel knows what its
+        // workers can do (conditional tools like browser and web search
+        // depend on runtime config).
+        let worker_capabilities = build_worker_capabilities(rc);
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(&worker_capabilities);
+
         if let Some(context) = &self.conversation_context {
             system_prompt.push_str("\n\n## Conversation Context\n\n");
             system_prompt.push_str(context);
@@ -699,6 +707,34 @@ pub async fn spawn_worker_from_state(
     tracing::info!(worker_id = %worker_id, task = %task, "worker spawned");
     
     Ok(worker_id)
+}
+
+/// Build a dynamic description of worker tool capabilities based on runtime config.
+///
+/// The channel needs to know what its workers can do so it delegates correctly.
+/// Browser and web search availability depend on config, so this can't be static.
+fn build_worker_capabilities(rc: &crate::config::RuntimeConfig) -> String {
+    let browser_enabled = rc.browser_config.load().enabled;
+    let web_search_enabled = rc.brave_search_key.load().is_some();
+
+    let mut section = String::from("## Worker Capabilities\n\n");
+    section.push_str("When you spawn a worker, it has access to the following tools:\n\n");
+    section.push_str("- **shell** — run shell commands\n");
+    section.push_str("- **file** — read, write, search, and list files\n");
+    section.push_str("- **exec** — run subprocesses with environment control\n");
+    section.push_str("- **set_status** — update worker status visible in your status block\n");
+
+    if browser_enabled {
+        section.push_str("- **browser** — browse web pages, take screenshots, click elements, fill forms\n");
+    }
+
+    if web_search_enabled {
+        section.push_str("- **web_search** — search the web via Brave Search API\n");
+    }
+
+    section.push_str("\nWorkers do NOT have conversation context or memory access. Include all necessary context in the task description.");
+
+    section
 }
 
 /// Format a user message with sender attribution from message metadata.
