@@ -23,12 +23,15 @@
 </p>
 
 <p align="center">
+  <a href="https://spacebot.sh"><strong>spacebot.sh</strong></a> •
   <a href="#how-it-works">How It Works</a> •
   <a href="#architecture">Architecture</a> •
   <a href="#quick-start">Quick Start</a> •
   <a href="#tech-stack">Tech Stack</a> •
   <a href="docs/">Docs</a>
 </p>
+
+> **One-click deploy with [spacebot.sh](https://spacebot.sh)** — connect your Discord or Telegram, configure your agent, and go. No self-hosting required.
 
 ---
 
@@ -279,12 +282,6 @@ spacebot/
 | [Browser](docs/browser.md) | Headless Chrome for workers |
 | [OpenCode](docs/opencode.md) | OpenCode as a worker backend |
 | [Philosophy](docs/philosophy.md) | Why Rust |
-
----
-
-## Status
-
-Active development. Core architecture is implemented and running. See the [roadmap](docs/roadmap.md) for current progress.
 
 ---
 
