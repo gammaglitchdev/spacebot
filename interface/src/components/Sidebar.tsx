@@ -45,19 +45,19 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 	return (
 		<motion.nav
 			className="flex h-full flex-col overflow-hidden border-r border-sidebar-line bg-sidebar"
-			animate={{ width: collapsed ? 48 : 224 }}
+			animate={{ width: collapsed ? 56 : 224 }}
 			transition={{ type: "spring", stiffness: 500, damping: 35 }}
 		>
 			{/* Logo + collapse toggle */}
 			<div className="flex h-12 items-center border-b border-sidebar-line px-3">
 				{collapsed ? (
 					<button onClick={onToggle} className="flex h-full w-full items-center justify-center">
-						<img src="/ball.png" alt="" className="h-5 w-5" draggable={false} />
+						<img src="/ball.png" alt="" className="h-6 w-6" draggable={false} />
 					</button>
 				) : (
 					<div className="flex flex-1 items-center justify-between">
 						<Link to="/" className="flex items-center gap-2">
-							<img src="/ball.png" alt="" className="h-5 w-5 flex-shrink-0" draggable={false} />
+							<img src="/ball.png" alt="" className="h-6 w-6 flex-shrink-0" draggable={false} />
 							<span className="whitespace-nowrap font-plex text-sm font-semibold text-sidebar-ink">
 								Spacebot
 							</span>

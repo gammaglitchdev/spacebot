@@ -540,9 +540,38 @@ async fn run(config: spacebot::config::Config, foreground: bool) -> anyhow::Resu
     // Start cortex bulletin loops for each agent
     let mut _cortex_handles = Vec::new();
     for (agent_id, agent) in &agents {
-        let handle = spacebot::agent::cortex::spawn_bulletin_loop(agent.deps.clone());
+        let cortex_logger = spacebot::agent::cortex::CortexLogger::new(agent.db.sqlite.clone());
+        let handle = spacebot::agent::cortex::spawn_bulletin_loop(agent.deps.clone(), cortex_logger);
         _cortex_handles.push(handle);
         tracing::info!(agent_id = %agent_id, "cortex bulletin loop started");
+    }
+
+    // Create cortex chat sessions for each agent
+    {
+        let mut sessions = std::collections::HashMap::new();
+        for (agent_id, agent) in &agents {
+            let browser_config = (**agent.deps.runtime_config.browser_config.load()).clone();
+            let brave_search_key = (**agent.deps.runtime_config.brave_search_key.load()).clone();
+            let conversation_logger = spacebot::conversation::history::ConversationLogger::new(agent.db.sqlite.clone());
+            let channel_store = spacebot::conversation::ChannelStore::new(agent.db.sqlite.clone());
+            let tool_server = spacebot::tools::create_cortex_chat_tool_server(
+                agent.deps.memory_search.clone(),
+                conversation_logger,
+                channel_store,
+                browser_config,
+                agent.config.screenshot_dir(),
+                brave_search_key,
+            );
+            let store = spacebot::agent::cortex_chat::CortexChatStore::new(agent.db.sqlite.clone());
+            let session = spacebot::agent::cortex_chat::CortexChatSession::new(
+                agent.deps.clone(),
+                tool_server,
+                store,
+            );
+            sessions.insert(agent_id.to_string(), std::sync::Arc::new(session));
+        }
+        api_state.set_cortex_chat_sessions(sessions);
+        tracing::info!("cortex chat sessions initialized");
     }
 
     let default_agent_id = config.default_agent_id().to_string();

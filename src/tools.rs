@@ -213,3 +213,36 @@ pub fn create_cortex_tool_server(memory_search: Arc<MemorySearch>) -> ToolServer
         .tool(MemorySaveTool::new(memory_search))
         .run()
 }
+
+/// Create a ToolServer for cortex chat sessions.
+///
+/// Combines branch tools (memory) with worker tools (shell, file, exec) to give
+/// the interactive cortex full capabilities. Does not include channel-specific
+/// tools (reply, react, skip) since the cortex chat doesn't talk to platforms.
+pub fn create_cortex_chat_tool_server(
+    memory_search: Arc<MemorySearch>,
+    conversation_logger: crate::conversation::history::ConversationLogger,
+    channel_store: crate::conversation::ChannelStore,
+    browser_config: BrowserConfig,
+    screenshot_dir: PathBuf,
+    brave_search_key: Option<String>,
+) -> ToolServerHandle {
+    let mut server = ToolServer::new()
+        .tool(MemorySaveTool::new(memory_search.clone()))
+        .tool(MemoryRecallTool::new(memory_search.clone()))
+        .tool(MemoryDeleteTool::new(memory_search))
+        .tool(ChannelRecallTool::new(conversation_logger, channel_store))
+        .tool(ShellTool::new())
+        .tool(FileTool::new())
+        .tool(ExecTool::new());
+
+    if browser_config.enabled {
+        server = server.tool(BrowserTool::new(browser_config, screenshot_dir));
+    }
+
+    if let Some(key) = brave_search_key {
+        server = server.tool(WebSearchTool::new(key));
+    }
+
+    server.run()
+}

@@ -1,6 +1,8 @@
 //! HTTP server setup: router, static file serving, and API routes.
 
 use super::state::{AgentInfo, ApiEvent, ApiState};
+use crate::agent::cortex::{CortexEvent, CortexLogger};
+use crate::agent::cortex_chat::{CortexChatEvent, CortexChatMessage, CortexChatStore};
 use crate::conversation::channels::ChannelStore;
 use crate::conversation::history::{ProcessRunLogger, TimelineItem};
 use crate::memory::types::{Memory, MemorySearchResult, MemoryType};
@@ -9,7 +11,7 @@ use crate::memory::search::{SearchConfig, SearchMode, SearchSort};
 use axum::extract::{Query, State};
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Json, Response, Sse};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use futures::stream::Stream;
 use rust_embed::Embed;
@@ -78,6 +80,26 @@ struct MemoriesSearchResponse {
     results: Vec<MemorySearchResult>,
 }
 
+#[derive(Serialize)]
+struct CortexEventsResponse {
+    events: Vec<CortexEvent>,
+    total: i64,
+}
+
+#[derive(Serialize)]
+struct CortexChatMessagesResponse {
+    messages: Vec<CortexChatMessage>,
+    thread_id: String,
+}
+
+#[derive(Deserialize)]
+struct CortexChatSendRequest {
+    agent_id: String,
+    thread_id: String,
+    message: String,
+    channel_id: Option<String>,
+}
+
 /// Start the HTTP server on the given address.
 ///
 /// The caller provides a pre-built `ApiState` so agent event streams and
@@ -101,7 +123,10 @@ pub async fn start_http_server(
         .route("/channels/messages", get(channel_messages))
         .route("/channels/status", get(channel_status))
         .route("/agents/memories", get(list_memories))
-        .route("/agents/memories/search", get(search_memories));
+        .route("/agents/memories/search", get(search_memories))
+        .route("/cortex/events", get(cortex_events))
+        .route("/cortex-chat/messages", get(cortex_chat_messages))
+        .route("/cortex-chat/send", post(cortex_chat_send));
 
     let app = Router::new()
         .nest("/api", api_routes)
@@ -393,6 +418,156 @@ async fn search_memories(
         })?;
 
     Ok(Json(MemoriesSearchResponse { results }))
+}
+
+// -- Cortex chat handlers --
+
+#[derive(Deserialize)]
+struct CortexChatMessagesQuery {
+    agent_id: String,
+    /// If omitted, loads the latest thread.
+    thread_id: Option<String>,
+    #[serde(default = "default_cortex_chat_limit")]
+    limit: i64,
+}
+
+fn default_cortex_chat_limit() -> i64 {
+    50
+}
+
+/// Load persisted cortex chat history for a thread.
+/// If no thread_id is provided, loads the latest thread.
+/// If no threads exist, returns an empty list with a fresh thread_id.
+async fn cortex_chat_messages(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<CortexChatMessagesQuery>,
+) -> Result<Json<CortexChatMessagesResponse>, StatusCode> {
+    let pools = state.agent_pools.load();
+    let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = CortexChatStore::new(pool.clone());
+
+    // Resolve thread_id: explicit > latest > generate new
+    let thread_id = if let Some(tid) = query.thread_id {
+        tid
+    } else {
+        store
+            .latest_thread_id()
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+    };
+
+    let messages = store
+        .load_history(&thread_id, query.limit.min(200))
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, agent_id = %query.agent_id, "failed to load cortex chat history");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(CortexChatMessagesResponse { messages, thread_id }))
+}
+
+/// Send a message to cortex chat. Returns an SSE stream with activity events.
+///
+/// Send a message to cortex chat. Returns an SSE stream with activity events.
+///
+/// The stream emits:
+/// - `thinking` — cortex is processing
+/// - `done` — full response text
+/// - `error` — if something went wrong
+async fn cortex_chat_send(
+    State(state): State<Arc<ApiState>>,
+    axum::Json(request): axum::Json<CortexChatSendRequest>,
+) -> Result<Sse<impl Stream<Item = Result<axum::response::sse::Event, Infallible>>>, StatusCode> {
+    let sessions = state.cortex_chat_sessions.load();
+    let session = sessions
+        .get(&request.agent_id)
+        .cloned()
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let thread_id = request.thread_id;
+    let message = request.message;
+    let channel_id = request.channel_id;
+
+    let stream = async_stream::stream! {
+        // Send thinking event
+        yield Ok(axum::response::sse::Event::default()
+            .event("thinking")
+            .data("{}"));
+
+        let channel_ref = channel_id.as_deref();
+        match session.send_message(&thread_id, &message, channel_ref).await {
+            Ok(response) => {
+                if let Ok(json) = serde_json::to_string(&CortexChatEvent::Done {
+                    full_text: response,
+                }) {
+                    yield Ok(axum::response::sse::Event::default()
+                        .event("done")
+                        .data(json));
+                }
+            }
+            Err(error) => {
+                if let Ok(json) = serde_json::to_string(&CortexChatEvent::Error {
+                    message: error.to_string(),
+                }) {
+                    yield Ok(axum::response::sse::Event::default()
+                        .event("error")
+                        .data(json));
+                }
+            }
+        }
+    };
+
+    Ok(Sse::new(stream))
+}
+
+// -- Cortex events handlers --
+
+#[derive(Deserialize)]
+struct CortexEventsQuery {
+    agent_id: String,
+    #[serde(default = "default_cortex_events_limit")]
+    limit: i64,
+    #[serde(default)]
+    offset: i64,
+    #[serde(default)]
+    event_type: Option<String>,
+}
+
+fn default_cortex_events_limit() -> i64 {
+    50
+}
+
+/// List cortex events for an agent with optional type filter, newest first.
+async fn cortex_events(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<CortexEventsQuery>,
+) -> Result<Json<CortexEventsResponse>, StatusCode> {
+    let pools = state.agent_pools.load();
+    let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let logger = CortexLogger::new(pool.clone());
+
+    let limit = query.limit.min(200);
+    let event_type_ref = query.event_type.as_deref();
+
+    let events = logger
+        .load_events(limit, query.offset, event_type_ref)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, agent_id = %query.agent_id, "failed to load cortex events");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let total = logger
+        .count_events(event_type_ref)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, agent_id = %query.agent_id, "failed to count cortex events");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(CortexEventsResponse { events, total }))
 }
 
 // -- Static file serving --

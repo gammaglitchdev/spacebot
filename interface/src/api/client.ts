@@ -259,6 +259,69 @@ export interface MemoriesSearchParams {
 	memory_type?: MemoryType;
 }
 
+export type CortexEventType =
+	| "bulletin_generated"
+	| "bulletin_failed"
+	| "maintenance_run"
+	| "memory_merged"
+	| "memory_decayed"
+	| "memory_pruned"
+	| "association_created"
+	| "contradiction_flagged"
+	| "worker_killed"
+	| "branch_killed"
+	| "circuit_breaker_tripped"
+	| "observation_created"
+	| "health_check";
+
+export const CORTEX_EVENT_TYPES: CortexEventType[] = [
+	"bulletin_generated", "bulletin_failed",
+	"maintenance_run", "memory_merged", "memory_decayed", "memory_pruned",
+	"association_created", "contradiction_flagged",
+	"worker_killed", "branch_killed", "circuit_breaker_tripped",
+	"observation_created", "health_check",
+];
+
+export interface CortexEvent {
+	id: string;
+	event_type: CortexEventType;
+	summary: string;
+	details: Record<string, unknown> | null;
+	created_at: string;
+}
+
+export interface CortexEventsResponse {
+	events: CortexEvent[];
+	total: number;
+}
+
+export interface CortexEventsParams {
+	limit?: number;
+	offset?: number;
+	event_type?: CortexEventType;
+}
+
+// -- Cortex Chat --
+
+export interface CortexChatMessage {
+	id: string;
+	thread_id: string;
+	role: "user" | "assistant";
+	content: string;
+	channel_context: string | null;
+	created_at: string;
+}
+
+export interface CortexChatMessagesResponse {
+	messages: CortexChatMessage[];
+	thread_id: string;
+}
+
+export type CortexChatSSEEvent =
+	| { type: "thinking" }
+	| { type: "done"; full_text: string }
+	| { type: "error"; message: string };
+
 export const api = {
 	status: () => fetchJson<StatusResponse>("/status"),
 	agents: () => fetchJson<AgentsResponse>("/agents"),
@@ -282,5 +345,28 @@ export const api = {
 		if (params.memory_type) search.set("memory_type", params.memory_type);
 		return fetchJson<MemoriesSearchResponse>(`/agents/memories/search?${search}`);
 	},
+	cortexEvents: (agentId: string, params: CortexEventsParams = {}) => {
+		const search = new URLSearchParams({ agent_id: agentId });
+		if (params.limit) search.set("limit", String(params.limit));
+		if (params.offset) search.set("offset", String(params.offset));
+		if (params.event_type) search.set("event_type", params.event_type);
+		return fetchJson<CortexEventsResponse>(`/cortex/events?${search}`);
+	},
+	cortexChatMessages: (agentId: string, threadId?: string, limit = 50) => {
+		const search = new URLSearchParams({ agent_id: agentId, limit: String(limit) });
+		if (threadId) search.set("thread_id", threadId);
+		return fetchJson<CortexChatMessagesResponse>(`/cortex-chat/messages?${search}`);
+	},
+	cortexChatSend: (agentId: string, threadId: string, message: string, channelId?: string) =>
+		fetch(`${API_BASE}/cortex-chat/send`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				agent_id: agentId,
+				thread_id: threadId,
+				message,
+				channel_id: channelId ?? null,
+			}),
+		}),
 	eventsUrl: `${API_BASE}/events`,
 };

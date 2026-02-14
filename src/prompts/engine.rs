@@ -49,6 +49,7 @@ impl PromptEngine {
             crate::prompts::text::get("memory_persistence"),
         )?;
         env.add_template("ingestion", crate::prompts::text::get("ingestion"))?;
+        env.add_template("cortex_chat", crate::prompts::text::get("cortex_chat"))?;
 
         // Fragment templates
         env.add_template(
@@ -330,6 +331,25 @@ impl PromptEngine {
                 conversation_context => conversation_context,
                 status_text => status_text,
                 coalesce_hint => coalesce_hint,
+            },
+        )
+    }
+
+    /// Render the cortex chat system prompt with optional channel context.
+    pub fn render_cortex_chat_prompt(
+        &self,
+        identity_context: Option<String>,
+        memory_bulletin: Option<String>,
+        channel_transcript: Option<String>,
+        worker_capabilities: String,
+    ) -> Result<String> {
+        self.render(
+            "cortex_chat",
+            context! {
+                identity_context => identity_context,
+                memory_bulletin => memory_bulletin,
+                channel_transcript => channel_transcript,
+                worker_capabilities => worker_capabilities,
             },
         )
     }

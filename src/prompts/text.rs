@@ -62,6 +62,7 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "compactor") => include_str!("../../prompts/en/compactor.md.j2"),
         ("en", "memory_persistence") => include_str!("../../prompts/en/memory_persistence.md.j2"),
         ("en", "ingestion") => include_str!("../../prompts/en/ingestion.md.j2"),
+        ("en", "cortex_chat") => include_str!("../../prompts/en/cortex_chat.md.j2"),
 
         // Fragment Templates
         ("en", "fragments/worker_capabilities") => {

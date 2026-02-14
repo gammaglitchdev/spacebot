@@ -61,11 +61,11 @@ This is why the architecture exists. A single-threaded agent breaks the moment t
 
 ### Deploy Your Way
 
-| Method | What You Get |
-|--------|-------------|
-| **[spacebot.sh](https://spacebot.sh)** | One-click hosted deploy. Connect your platforms, configure your agent, done. |
-| **Self-hosted** | Single Rust binary. No Docker, no server dependencies, no microservices. Clone, build, run. |
-| **Docker** | Container image with everything included. Mount a volume for persistent data. |
+| Method                                 | What You Get                                                                                |
+| -------------------------------------- | ------------------------------------------------------------------------------------------- |
+| **[spacebot.sh](https://spacebot.sh)** | One-click hosted deploy. Connect your platforms, configure your agent, done.                |
+| **Self-hosted**                        | Single Rust binary. No Docker, no server dependencies, no microservices. Clone, build, run. |
+| **Docker**                             | Container image with everything included. Mount a volume for persistent data.               |
 
 ---
 
@@ -87,7 +87,6 @@ Workers come loaded with tools for real work:
 Native adapters for Discord and Slack with full platform feature support:
 
 - **Message coalescing** — rapid-fire messages are batched into a single LLM turn with timing context, so the agent reads the room instead of spamming replies
-- **Streaming responses** — text appears word-by-word via message edits, not as a wall of text after 30 seconds
 - **File attachments** — send and receive files, images, and documents
 - **Threading** — automatic thread creation for long conversations
 - **Reactions** — emoji reactions on messages
@@ -97,7 +96,7 @@ Native adapters for Discord and Slack with full platform feature support:
 
 ### Memory
 
-Not markdown files. Not unstructured blocks in a vector database. Spacebot's memory is a typed, graph-connected knowledge system — and this opinionated structure is why agents are productive out of the box.
+Not markdown files. Not _unstructured_ blocks in a vector database. Spacebot's memory is a typed, graph-connected knowledge system — and this opinionated structure is why agents are productive out of the box.
 
 Every memory has a type, an importance score, and graph edges connecting it to related memories. The agent doesn't just "remember things" — it knows the difference between a fact it learned, a decision that was made, a goal it's working toward, and a preference the user expressed. This structure is what lets the cortex synthesize a useful briefing instead of dumping raw search results into context.
 
@@ -185,11 +184,11 @@ Workers are pluggable. Any process that accepts a task and reports status can be
 
 Not an LLM process. A programmatic monitor per channel that watches context size and triggers compaction before the channel fills up.
 
-| Threshold | Action |
-|-----------|--------|
-| **>80%** | Background compaction (summarize oldest 30%) |
-| **>85%** | Aggressive compaction (summarize oldest 50%) |
-| **>95%** | Emergency truncation (hard drop, no LLM) |
+| Threshold | Action                                       |
+| --------- | -------------------------------------------- |
+| **>80%**  | Background compaction (summarize oldest 30%) |
+| **>85%**  | Aggressive compaction (summarize oldest 50%) |
+| **>95%**  | Emergency truncation (hard drop, no LLM)     |
 
 Compaction workers run alongside the channel without blocking it. Summaries stack chronologically at the top of the context window.
 
@@ -306,20 +305,20 @@ The binary creates all databases and directories automatically on first run. See
 
 ## Tech Stack
 
-| Layer | Technology |
-|-------|-----------|
-| Language | **Rust** (edition 2024) |
-| Async runtime | **Tokio** |
-| LLM framework | **[Rig](https://github.com/0xPlaygrounds/rig)** v0.30 — agentic loop, tool execution, hooks |
-| Relational data | **SQLite** (sqlx) — conversations, memory graph, cron jobs |
-| Vector + FTS | **[LanceDB](https://lancedb.github.io/lancedb/)** — embeddings (HNSW), full-text (Tantivy), hybrid search (RRF) |
-| Key-value | **[redb](https://github.com/cberner/redb)** — settings, encrypted secrets |
-| Embeddings | **FastEmbed** — local embedding generation |
-| Crypto | **AES-256-GCM** — secret encryption at rest |
-| Discord | **Serenity** — gateway, cache, events |
-| Slack | **slack-morphism** — Socket Mode, events, streaming via message edits |
-| Browser | **Chromiumoxide** — headless Chrome via CDP |
-| CLI | **Clap** — command line interface |
+| Layer           | Technology                                                                                                      |
+| --------------- | --------------------------------------------------------------------------------------------------------------- |
+| Language        | **Rust** (edition 2024)                                                                                         |
+| Async runtime   | **Tokio**                                                                                                       |
+| LLM framework   | **[Rig](https://github.com/0xPlaygrounds/rig)** v0.30 — agentic loop, tool execution, hooks                     |
+| Relational data | **SQLite** (sqlx) — conversations, memory graph, cron jobs                                                      |
+| Vector + FTS    | **[LanceDB](https://lancedb.github.io/lancedb/)** — embeddings (HNSW), full-text (Tantivy), hybrid search (RRF) |
+| Key-value       | **[redb](https://github.com/cberner/redb)** — settings, encrypted secrets                                       |
+| Embeddings      | **FastEmbed** — local embedding generation                                                                      |
+| Crypto          | **AES-256-GCM** — secret encryption at rest                                                                     |
+| Discord         | **Serenity** — gateway, cache, events                                                                           |
+| Slack           | **slack-morphism** — Socket Mode, events, streaming via message edits                                           |
+| Browser         | **Chromiumoxide** — headless Chrome via CDP                                                                     |
+| CLI             | **Clap** — command line interface                                                                               |
 
 No server dependencies. Single binary. All data lives in embedded databases in a local directory.
 
@@ -327,23 +326,23 @@ No server dependencies. Single binary. All data lives in embedded databases in a
 
 ## Documentation
 
-| Doc | Description |
-|-----|-------------|
-| [Quick Start](docs/quickstart.md) | Setup, config, first run |
-| [Daemon](docs/daemon.md) | Background operation, IPC, logging |
-| [Config Reference](docs/config.md) | Full `config.toml` reference |
-| [Agents](docs/agents.md) | Multi-agent setup and isolation |
-| [Memory](docs/memory.md) | Memory system design |
-| [Tools](docs/tools.md) | All available LLM tools |
-| [Compaction](docs/compaction.md) | Context window management |
-| [Cortex](docs/cortex.md) | Memory bulletin and system observation |
-| [Cron Jobs](docs/cron.md) | Scheduled recurring tasks |
-| [Routing](docs/routing.md) | Model routing and fallback chains |
-| [Messaging](docs/messaging.md) | Adapter architecture (Discord, Slack, Telegram, webhook) |
-| [Discord Setup](docs/discord-setup.md) | Discord bot setup guide |
-| [Browser](docs/browser.md) | Headless Chrome for workers |
-| [OpenCode](docs/opencode.md) | OpenCode as a worker backend |
-| [Philosophy](docs/philosophy.md) | Why Rust |
+| Doc                                    | Description                                              |
+| -------------------------------------- | -------------------------------------------------------- |
+| [Quick Start](docs/quickstart.md)      | Setup, config, first run                                 |
+| [Daemon](docs/daemon.md)               | Background operation, IPC, logging                       |
+| [Config Reference](docs/config.md)     | Full `config.toml` reference                             |
+| [Agents](docs/agents.md)               | Multi-agent setup and isolation                          |
+| [Memory](docs/memory.md)               | Memory system design                                     |
+| [Tools](docs/tools.md)                 | All available LLM tools                                  |
+| [Compaction](docs/compaction.md)       | Context window management                                |
+| [Cortex](docs/cortex.md)               | Memory bulletin and system observation                   |
+| [Cron Jobs](docs/cron.md)              | Scheduled recurring tasks                                |
+| [Routing](docs/routing.md)             | Model routing and fallback chains                        |
+| [Messaging](docs/messaging.md)         | Adapter architecture (Discord, Slack, Telegram, webhook) |
+| [Discord Setup](docs/discord-setup.md) | Discord bot setup guide                                  |
+| [Browser](docs/browser.md)             | Headless Chrome for workers                              |
+| [OpenCode](docs/opencode.md)           | OpenCode as a worker backend                             |
+| [Philosophy](docs/philosophy.md)       | Why Rust                                                 |
 
 ---
 

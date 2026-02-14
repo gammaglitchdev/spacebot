@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
+import { AnimatePresence, motion } from "framer-motion";
 import type { ChannelInfo, TimelineItem, TimelineBranchRun, TimelineWorkerRun } from "@/api/client";
 import type { ChannelLiveState, ActiveWorker, ActiveBranch } from "@/hooks/useChannelLiveState";
+import { CortexChatPanel } from "@/components/CortexChatPanel";
 import { LiveDuration } from "@/components/LiveDuration";
 import { Markdown } from "@/components/Markdown";
 import { formatTimestamp, platformIcon, platformColor } from "@/lib/format";
@@ -193,6 +195,7 @@ export function ChannelDetail({ agentId, channelId, channel, liveState }: Channe
 	const activeWorkerCount = Object.keys(workers).length;
 	const activeBranchCount = Object.keys(branches).length;
 	const hasActivity = activeWorkerCount > 0 || activeBranchCount > 0;
+	const [cortexOpen, setCortexOpen] = useState(false);
 
 	const messagesEndRef = useRef<HTMLDivElement>(null);
 	const prevTimelineCount = useRef(timeline.length);
@@ -206,90 +209,128 @@ export function ChannelDetail({ agentId, channelId, channel, liveState }: Channe
 	}, [timeline.length]);
 
 	return (
-		<div className="flex h-full flex-col">
-			{/* Channel sub-header */}
-			<div className="flex h-12 items-center gap-3 border-b border-app-line/50 bg-app-darkBox/20 px-6">
-				<Link
-					to="/agents/$agentId/channels"
-					params={{ agentId }}
-					className="text-tiny text-ink-faint hover:text-ink-dull"
-				>
-					Channels
-				</Link>
-				<span className="text-ink-faint/50">/</span>
-				<span className="text-sm font-medium text-ink">
-					{channel?.display_name ?? channelId}
-				</span>
-				{channel && (
-					<span className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-tiny font-medium ${platformColor(channel.platform)}`}>
-						{platformIcon(channel.platform)}
+		<div className="flex h-full">
+			{/* Main channel content */}
+			<div className="flex flex-1 flex-col overflow-hidden">
+				{/* Channel sub-header */}
+				<div className="flex h-12 items-center gap-3 border-b border-app-line/50 bg-app-darkBox/20 px-6">
+					<Link
+						to="/agents/$agentId/channels"
+						params={{ agentId }}
+						className="text-tiny text-ink-faint hover:text-ink-dull"
+					>
+						Channels
+					</Link>
+					<span className="text-ink-faint/50">/</span>
+					<span className="text-sm font-medium text-ink">
+						{channel?.display_name ?? channelId}
 					</span>
-				)}
+					{channel && (
+						<span className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-tiny font-medium ${platformColor(channel.platform)}`}>
+							{platformIcon(channel.platform)}
+						</span>
+					)}
 
-				{/* Right side: activity indicators + typing */}
-				<div className="ml-auto flex items-center gap-3">
-					{hasActivity && (
-						<div className="flex items-center gap-2">
-							{activeWorkerCount > 0 && (
-								<div className="flex items-center gap-1.5">
-									<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
-									<span className="text-tiny text-amber-300">
-										{activeWorkerCount} worker{activeWorkerCount !== 1 ? "s" : ""}
-									</span>
-								</div>
-							)}
-							{activeBranchCount > 0 && (
-								<div className="flex items-center gap-1.5">
-									<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400" />
-									<span className="text-tiny text-violet-300">
-										{activeBranchCount} branch{activeBranchCount !== 1 ? "es" : ""}
-									</span>
-								</div>
-							)}
-						</div>
-					)}
-					{isTyping && (
-						<div className="flex items-center gap-1">
-							<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
-							<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent [animation-delay:0.2s]" />
-							<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent [animation-delay:0.4s]" />
-							<span className="ml-1 text-tiny text-ink-faint">typing</span>
-						</div>
-					)}
-				</div>
-			</div>
-
-			{/* Timeline */}
-			<div className="flex-1 overflow-y-auto">
-				<div className="flex flex-col gap-1 p-6">
-					{timeline.length === 0 ? (
-						<p className="text-sm text-ink-faint">No messages yet</p>
-					) : (
-						timeline.map((item) => (
-							<TimelineEntry
-								key={item.id}
-								item={item}
-								liveWorkers={workers}
-								liveBranches={branches}
-							/>
-						))
-					)}
-					{isTyping && (
-						<div className="flex gap-3 px-3 py-2">
-							<span className="flex-shrink-0 pt-0.5 text-tiny text-ink-faint">
-								{formatTimestamp(Date.now())}
-							</span>
-							<div className="flex items-center gap-1.5">
-								<span className="text-sm font-medium text-green-400">bot</span>
-								<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint" />
-								<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.2s]" />
-								<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.4s]" />
+					{/* Right side: activity indicators + typing + cortex toggle */}
+					<div className="ml-auto flex items-center gap-3">
+						{hasActivity && (
+							<div className="flex items-center gap-2">
+								{activeWorkerCount > 0 && (
+									<div className="flex items-center gap-1.5">
+										<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+										<span className="text-tiny text-amber-300">
+											{activeWorkerCount} worker{activeWorkerCount !== 1 ? "s" : ""}
+										</span>
+									</div>
+								)}
+								{activeBranchCount > 0 && (
+									<div className="flex items-center gap-1.5">
+										<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400" />
+										<span className="text-tiny text-violet-300">
+											{activeBranchCount} branch{activeBranchCount !== 1 ? "es" : ""}
+										</span>
+									</div>
+								)}
 							</div>
-						</div>
-					)}
-					<div ref={messagesEndRef} />
+						)}
+						{isTyping && (
+							<div className="flex items-center gap-1">
+								<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+								<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent [animation-delay:0.2s]" />
+								<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent [animation-delay:0.4s]" />
+								<span className="ml-1 text-tiny text-ink-faint">typing</span>
+							</div>
+						)}
+						<button
+							onClick={() => setCortexOpen(!cortexOpen)}
+							className={`rounded p-1.5 transition-colors ${
+								cortexOpen
+									? "bg-violet-500/20 text-violet-400"
+									: "text-ink-faint hover:bg-app-darkBox hover:text-ink-dull"
+							}`}
+							title="Toggle cortex chat"
+						>
+							<svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+								<circle cx="8" cy="8" r="3" />
+								<path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" />
+							</svg>
+						</button>
+					</div>
+				</div>
+
+				{/* Timeline */}
+				<div className="flex-1 overflow-y-auto">
+					<div className="flex flex-col gap-1 p-6">
+						{timeline.length === 0 ? (
+							<p className="text-sm text-ink-faint">No messages yet</p>
+						) : (
+							timeline.map((item) => (
+								<TimelineEntry
+									key={item.id}
+									item={item}
+									liveWorkers={workers}
+									liveBranches={branches}
+								/>
+							))
+						)}
+						{isTyping && (
+							<div className="flex gap-3 px-3 py-2">
+								<span className="flex-shrink-0 pt-0.5 text-tiny text-ink-faint">
+									{formatTimestamp(Date.now())}
+								</span>
+								<div className="flex items-center gap-1.5">
+									<span className="text-sm font-medium text-green-400">bot</span>
+									<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint" />
+									<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.2s]" />
+									<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.4s]" />
+								</div>
+							</div>
+						)}
+						<div ref={messagesEndRef} />
+					</div>
 				</div>
 			</div>
+
+			{/* Cortex chat panel */}
+			<AnimatePresence>
+				{cortexOpen && (
+					<motion.div
+						initial={{ width: 0, opacity: 0 }}
+						animate={{ width: 400, opacity: 1 }}
+						exit={{ width: 0, opacity: 0 }}
+						transition={{ type: "spring", stiffness: 400, damping: 30 }}
+						className="flex-shrink-0 overflow-hidden border-l border-app-line/50"
+					>
+						<div className="h-full w-[400px]">
+							<CortexChatPanel
+								agentId={agentId}
+								channelId={channelId}
+								onClose={() => setCortexOpen(false)}
+							/>
+						</div>
+					</motion.div>
+				)}
+			</AnimatePresence>
 		</div>
 	);
 }

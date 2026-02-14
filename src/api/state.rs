@@ -1,9 +1,12 @@
 //! Shared state for the HTTP API.
 
+use crate::agent::cortex_chat::CortexChatSession;
 use crate::agent::status::StatusBlock;
 use crate::memory::MemorySearch;
 use crate::{ProcessEvent, ProcessId};
+
 use serde::Serialize;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,6 +36,8 @@ pub struct ApiState {
     pub memory_searches: arc_swap::ArcSwap<HashMap<String, Arc<MemorySearch>>>,
     /// Live status blocks for active channels, keyed by channel_id.
     pub channel_status_blocks: RwLock<HashMap<String, Arc<tokio::sync::RwLock<StatusBlock>>>>,
+    /// Per-agent cortex chat sessions.
+    pub cortex_chat_sessions: arc_swap::ArcSwap<HashMap<String, Arc<CortexChatSession>>>,
 }
 
 /// Events sent to SSE clients. Wraps ProcessEvents with agent context.
@@ -121,6 +126,7 @@ impl ApiState {
             agent_configs: arc_swap::ArcSwap::from_pointee(Vec::new()),
             memory_searches: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             channel_status_blocks: RwLock::new(HashMap::new()),
+            cortex_chat_sessions: arc_swap::ArcSwap::from_pointee(HashMap::new()),
         }
     }
 
@@ -243,6 +249,11 @@ impl ApiState {
     /// Set the memory search instances for all agents.
     pub fn set_memory_searches(&self, searches: HashMap<String, Arc<MemorySearch>>) {
         self.memory_searches.store(Arc::new(searches));
+    }
+
+    /// Set the cortex chat sessions for all agents.
+    pub fn set_cortex_chat_sessions(&self, sessions: HashMap<String, Arc<CortexChatSession>>) {
+        self.cortex_chat_sessions.store(Arc::new(sessions));
     }
 }
 

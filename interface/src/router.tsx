@@ -10,6 +10,7 @@ import { Sidebar } from "@/components/Sidebar";
 import { Overview } from "@/routes/Overview";
 import { AgentDetail } from "@/routes/AgentDetail";
 import { AgentChannels } from "@/routes/AgentChannels";
+import { AgentCortex } from "@/routes/AgentCortex";
 import { ChannelDetail } from "@/routes/ChannelDetail";
 import { AgentMemories } from "@/routes/AgentMemories";
 import { useLiveContext } from "@/hooks/useLiveContext";
@@ -183,8 +184,8 @@ const agentCortexRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
-				<div className="flex flex-1 items-center justify-center">
-					<p className="text-sm text-ink-faint">Cortex coming soon</p>
+				<div className="flex-1 overflow-hidden">
+					<AgentCortex agentId={agentId} />
 				</div>
 			</div>
 		);

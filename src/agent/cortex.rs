@@ -18,9 +18,11 @@ use crate::hooks::CortexHook;
 
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel, Prompt};
+use serde::Serialize;
+use sqlx::SqlitePool;
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 /// The cortex observes system-wide activity and maintains the memory bulletin.
@@ -61,6 +63,129 @@ pub enum Signal {
         component: String,
         error_summary: String,
     },
+}
+
+/// A persisted cortex action record.
+#[derive(Debug, Clone, Serialize)]
+pub struct CortexEvent {
+    pub id: String,
+    pub event_type: String,
+    pub summary: String,
+    pub details: Option<serde_json::Value>,
+    pub created_at: String,
+}
+
+/// Persists cortex actions to SQLite for audit and UI display.
+///
+/// All writes are fire-and-forget — they spawn a tokio task and return
+/// immediately so the cortex never blocks on a DB write.
+#[derive(Debug, Clone)]
+pub struct CortexLogger {
+    pool: SqlitePool,
+}
+
+impl CortexLogger {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    /// Log a cortex action. Fire-and-forget.
+    pub fn log(&self, event_type: &str, summary: &str, details: Option<serde_json::Value>) {
+        let pool = self.pool.clone();
+        let id = uuid::Uuid::new_v4().to_string();
+        let event_type = event_type.to_string();
+        let summary = summary.to_string();
+        let details_json = details.map(|d| d.to_string());
+
+        tokio::spawn(async move {
+            if let Err(error) = sqlx::query(
+                "INSERT INTO cortex_events (id, event_type, summary, details) VALUES (?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&event_type)
+            .bind(&summary)
+            .bind(&details_json)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(%error, "failed to persist cortex event");
+            }
+        });
+    }
+
+    /// Load cortex events with optional type filter, newest first.
+    pub async fn load_events(
+        &self,
+        limit: i64,
+        offset: i64,
+        event_type: Option<&str>,
+    ) -> std::result::Result<Vec<CortexEvent>, sqlx::Error> {
+        let rows = if let Some(event_type) = event_type {
+            sqlx::query_as::<_, CortexEventRow>(
+                "SELECT id, event_type, summary, details, created_at FROM cortex_events \
+                 WHERE event_type = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            )
+            .bind(event_type)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, CortexEventRow>(
+                "SELECT id, event_type, summary, details, created_at FROM cortex_events \
+                 ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            )
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        Ok(rows.into_iter().map(|row| row.into_event()).collect())
+    }
+
+    /// Count cortex events with optional type filter.
+    pub async fn count_events(
+        &self,
+        event_type: Option<&str>,
+    ) -> std::result::Result<i64, sqlx::Error> {
+        let count: (i64,) = if let Some(event_type) = event_type {
+            sqlx::query_as("SELECT COUNT(*) FROM cortex_events WHERE event_type = ?")
+                .bind(event_type)
+                .fetch_one(&self.pool)
+                .await?
+        } else {
+            sqlx::query_as("SELECT COUNT(*) FROM cortex_events")
+                .fetch_one(&self.pool)
+                .await?
+        };
+
+        Ok(count.0)
+    }
+}
+
+/// Internal row type for SQLite query mapping.
+#[derive(sqlx::FromRow)]
+struct CortexEventRow {
+    id: String,
+    event_type: String,
+    summary: String,
+    details: Option<String>,
+    created_at: chrono::NaiveDateTime,
+}
+
+impl CortexEventRow {
+    fn into_event(self) -> CortexEvent {
+        CortexEvent {
+            id: self.id,
+            event_type: self.event_type,
+            summary: self.summary,
+            details: self
+                .details
+                .and_then(|d| serde_json::from_str(&d).ok()),
+            created_at: self.created_at.and_utc().to_rfc3339(),
+        }
+    }
 }
 
 impl Cortex {
@@ -123,15 +248,15 @@ impl Cortex {
 /// Generates a memory bulletin immediately on startup, then refreshes on a
 /// configurable interval. The bulletin is stored in `RuntimeConfig::memory_bulletin`
 /// and injected into every channel's system prompt.
-pub fn spawn_bulletin_loop(deps: AgentDeps) -> tokio::task::JoinHandle<()> {
+pub fn spawn_bulletin_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(error) = run_bulletin_loop(&deps).await {
+        if let Err(error) = run_bulletin_loop(&deps, &logger).await {
             tracing::error!(%error, "cortex bulletin loop exited with error");
         }
     })
 }
 
-async fn run_bulletin_loop(deps: &AgentDeps) -> anyhow::Result<()> {
+async fn run_bulletin_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::Result<()> {
     tracing::info!("cortex bulletin loop started");
 
     const MAX_RETRIES: u32 = 3;
@@ -139,7 +264,7 @@ async fn run_bulletin_loop(deps: &AgentDeps) -> anyhow::Result<()> {
 
     // Run immediately on startup, with retries
     for attempt in 0..=MAX_RETRIES {
-        if generate_bulletin(deps).await {
+        if generate_bulletin(deps, logger).await {
             break;
         }
         if attempt < MAX_RETRIES {
@@ -147,6 +272,11 @@ async fn run_bulletin_loop(deps: &AgentDeps) -> anyhow::Result<()> {
                 attempt = attempt + 1,
                 max = MAX_RETRIES,
                 "retrying bulletin generation in {RETRY_DELAY_SECS}s"
+            );
+            logger.log(
+                "bulletin_failed",
+                &format!("Bulletin generation failed, retrying (attempt {}/{})", attempt + 1, MAX_RETRIES),
+                Some(serde_json::json!({ "attempt": attempt + 1, "max_retries": MAX_RETRIES })),
             );
             tokio::time::sleep(Duration::from_secs(RETRY_DELAY_SECS)).await;
         }
@@ -158,7 +288,7 @@ async fn run_bulletin_loop(deps: &AgentDeps) -> anyhow::Result<()> {
 
         tokio::time::sleep(Duration::from_secs(interval)).await;
 
-        generate_bulletin(deps).await;
+        generate_bulletin(deps, logger).await;
     }
 }
 
@@ -285,17 +415,29 @@ async fn gather_bulletin_sections(deps: &AgentDeps) -> String {
 ///
 /// On failure, the previous bulletin is preserved (not blanked out).
 /// Returns `true` if the bulletin was successfully generated.
-pub async fn generate_bulletin(deps: &AgentDeps) -> bool {
+pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool {
     tracing::info!("cortex generating memory bulletin");
+    let started = Instant::now();
 
     // Phase 1: Programmatically gather raw memory sections (no LLM needed)
     let raw_sections = gather_bulletin_sections(deps).await;
+    let section_count = raw_sections.matches("### ").count();
 
     if raw_sections.is_empty() {
         tracing::info!("no memories found, skipping bulletin synthesis");
         deps.runtime_config
             .memory_bulletin
             .store(Arc::new(String::new()));
+        logger.log(
+            "bulletin_generated",
+            "Bulletin skipped: no memories in graph",
+            Some(serde_json::json!({
+                "word_count": 0,
+                "sections": 0,
+                "duration_ms": started.elapsed().as_millis() as u64,
+                "skipped": true,
+            })),
+        );
         return true;
     }
 
@@ -323,6 +465,7 @@ pub async fn generate_bulletin(deps: &AgentDeps) -> bool {
     match agent.prompt(&synthesis_prompt).await {
         Ok(bulletin) => {
             let word_count = bulletin.split_whitespace().count();
+            let duration_ms = started.elapsed().as_millis() as u64;
             tracing::info!(
                 words = word_count,
                 bulletin = %bulletin,
@@ -331,10 +474,30 @@ pub async fn generate_bulletin(deps: &AgentDeps) -> bool {
             deps.runtime_config
                 .memory_bulletin
                 .store(Arc::new(bulletin));
+            logger.log(
+                "bulletin_generated",
+                &format!("Bulletin generated: {word_count} words, {section_count} sections, {duration_ms}ms"),
+                Some(serde_json::json!({
+                    "word_count": word_count,
+                    "sections": section_count,
+                    "duration_ms": duration_ms,
+                    "model": model_name,
+                })),
+            );
             true
         }
         Err(error) => {
+            let duration_ms = started.elapsed().as_millis() as u64;
             tracing::error!(%error, "cortex bulletin synthesis failed, keeping previous bulletin");
+            logger.log(
+                "bulletin_failed",
+                &format!("Bulletin synthesis failed after {duration_ms}ms: {error}"),
+                Some(serde_json::json!({
+                    "error": error.to_string(),
+                    "duration_ms": duration_ms,
+                    "model": model_name,
+                })),
+            );
             false
         }
     }

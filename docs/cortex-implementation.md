@@ -1,0 +1,202 @@
+# Cortex Implementation Plan
+
+The cortex is designed to be the system's self-awareness — supervising processes, maintaining memory coherence, and generating the memory bulletin. Today, only the bulletin works. Everything else is dead code or stubs.
+
+This doc covers the path from "bulletin generator" to "full system supervisor."
+
+## What Exists Today
+
+**Running:**
+- `spawn_bulletin_loop()` — generates the memory bulletin on startup, refreshes hourly via LLM synthesis of pre-gathered memory data. Fully functional.
+
+**Defined but never instantiated:**
+- `Cortex` struct — has `observe()` (converts 3 of 12 event types into signals with hardcoded dummy values) and `run_consolidation()` (logs and returns `Ok(())`).
+- `Signal` enum — 6 variants, none ever constructed at runtime.
+- `CortexHook` — all methods return `Continue` with trace logging.
+
+**Implemented but never called:**
+- `memory/maintenance.rs` — `apply_decay()` and `prune_memories()` work. `merge_similar_memories()` is a stub returning `Ok(0)`.
+
+**Wired through config but never read:**
+- `CortexConfig` fields: `tick_interval_secs` (30), `worker_timeout_secs` (300), `branch_timeout_secs` (60), `circuit_breaker_threshold` (3). All resolve through `env > DB > default` and support hot-reload.
+
+**Referenced in prompts but don't exist:**
+- `memory_consolidate` tool
+- `system_monitor` tool
+
+**Event bus:**
+- 12 `ProcessEvent` variants on a `broadcast::Sender<ProcessEvent>` per agent.
+- `MemorySaved` and `CompactionTriggered` variants are defined but never emitted by any code.
+
+## Phase 1: The Tick Loop
+
+Get the cortex running as a persistent process that observes the event bus and ticks on an interval. Purely programmatic — no LLM.
+
+### Wire missing event emission
+
+- Emit `MemorySaved` from `memory_save` tool after successful save
+- Emit `CompactionTriggered` from the compactor when thresholds are hit
+
+### Instantiate the cortex
+
+- Call `Cortex::new()` in `main.rs` alongside `spawn_bulletin_loop()`
+- Subscribe to the event bus via `deps.event_tx.subscribe()`
+- Run a `tokio::select!` loop:
+  - Receive events → feed through `observe()`
+  - Tick on `cortex_config.tick_interval_secs`
+- Move bulletin generation into the cortex's tick loop (currently a standalone free function)
+
+### Fix `observe()` to extract real values
+
+- Map all 12 `ProcessEvent` variants, not just 3
+- Pull real `memory_type`, `importance`, content summaries from events
+- Enrich `MemorySaved` event variant with `memory_type` and `importance` fields so the cortex gets useful data without querying the store
+
+### Rework `Signal` enum
+
+- Align variants with what `ProcessEvent` actually provides
+- Add `WorkerStarted`, `BranchStarted`, `WorkerStatus`
+- Remove variants that have no event source (`ChannelStarted`, `ChannelEnded` — these can be added later when the messaging layer emits them)
+
+**End state:** The cortex is running, consuming all events, building a signal buffer, and ticking. It sees everything but doesn't act on anything yet.
+
+## Phase 2: System Health
+
+The supervisor role. Still no LLM — state tracking and threshold checks.
+
+### Track active processes
+
+Maintain state maps in the cortex:
+
+```
+HashMap<WorkerId, WorkerTracker>  — start time, last status time, channel_id, error count
+HashMap<BranchId, BranchTracker>  — start time, channel_id
+```
+
+Populated from `WorkerStarted`, `WorkerStatus`, `WorkerComplete`, `BranchStarted`, `BranchResult` events. Cleaned up on completion events.
+
+### Worker supervision (each tick)
+
+- Detect workers with no status update in `worker_timeout_secs`
+- Kill hanging workers via cancellation token (needs a direct cancellation path — the current `CancelTool` works through `ChannelState`, which the cortex doesn't have)
+- Clean up completed workers that haven't been acknowledged
+- Log worker lifecycle stats
+
+### Branch supervision (each tick)
+
+- Detect branches running longer than `branch_timeout_secs`
+- Kill stale branches via cancellation token
+- Track branch latency (rolling average) for system health visibility
+
+### Circuit breaker
+
+- Track consecutive failures by component key (tool name, provider name, operation type)
+- After `circuit_breaker_threshold` consecutive failures, flag the component and log a warning
+- Reset counter on success
+- How flags affect behavior is an open question (see below)
+
+**End state:** The cortex actively monitors process health and cleans up stuck/stale processes.
+
+## Phase 3: Memory Maintenance
+
+Wire up the maintenance code that already exists in `memory/maintenance.rs`.
+
+### Schedule maintenance in the tick loop
+
+- Add `maintenance_interval_secs` to `CortexConfig` (default: 3600)
+- On the maintenance tick, call `run_maintenance()` with the current `MaintenanceConfig`
+- Log the `MaintenanceReport` (decayed, pruned, merged counts)
+- Respect hot-reload — `MaintenanceConfig` values should come from `CortexConfig`
+
+### Finish `merge_similar_memories()`
+
+- Query LanceDB for high-similarity memory pairs above `merge_similarity_threshold` (default 0.95)
+- Keep the higher-importance memory as the survivor
+- Merge content from the lower-importance memory into the survivor
+- Create `Updates` association from survivor to merged memory
+- Transfer associations from the merged memory to the survivor
+- Soft-delete the merged memory
+
+**End state:** Memories decay over time, low-importance orphans get pruned, near-duplicates get merged. All on autopilot.
+
+## Phase 4: Memory Consolidation (LLM-Assisted)
+
+This is where the cortex becomes an LLM agent. Cross-channel memory coherence requires reasoning that can't be done programmatically.
+
+### Implement `system_monitor` tool
+
+Returns structured data about the current system state:
+- Active channels, workers, branches (from Phase 2 tracking state)
+- Memory store stats: count by type, importance distribution, recent saves
+- Recent error rates and patterns (from circuit breaker state)
+- Compaction history
+
+### Implement `memory_consolidate` tool
+
+Accepts operations:
+- **merge** — combine two memories by ID, keep richer content, union associations
+- **associate** — create a typed edge between two memories (RelatedTo, Updates, Contradicts, CausedBy, PartOf)
+- **lower_importance** — decay a specific memory's importance score
+- **flag_contradiction** — create a `Contradicts` edge between two memories
+
+### Build the consolidation agent
+
+- Use `cortex.md.j2` system prompt (the existing 93-line supervisor prompt, possibly trimmed to focus on consolidation)
+- Tool server: `memory_consolidate` + `system_monitor` + `memory_save` (for creating observations)
+- Run on a separate interval from the tick loop (consolidation is expensive — default every 6 hours, or triggered by event volume)
+- Feed it a summary of recent signal buffer activity as user prompt context
+
+### Cross-channel coherence
+
+The main value of an LLM-powered cortex — connecting dots that individual branches can't see.
+
+- When `MemorySaved` events arrive from different channels with similar content, queue them for the next consolidation run
+- The consolidation agent decides: merge, associate, or leave alone
+- Duplicate detection across channels (the same fact saved by two different conversations)
+
+### Observation creation
+
+- The cortex is the only process that creates `Observation` type memories
+- Pattern detection from the signal buffer: recurring topics, frequent task types, behavioral patterns
+- Low importance by default — ambient awareness, not high-priority recall
+- Observations feed into the next bulletin generation, closing the loop
+
+**End state:** The cortex maintains memory coherence across channels, creates cross-channel associations, detects patterns, and generates observations.
+
+## Phase 5: CortexHook
+
+Make the hook do real work instead of trace logging.
+
+- Track LLM call counts and latencies per process type
+- Detect anomalies: unusually high tool call rates, repeated errors on the same tool
+- Feed anomaly signals into the signal buffer for the tick loop
+- Lower priority than the other phases — the tick loop already sees events via the bus. The hook adds per-LLM-call granularity.
+
+## Phase Ordering
+
+```
+Phase 1 (tick loop)     — standalone, just plumbing
+Phase 2 (health)        — depends on Phase 1
+Phase 3 (maintenance)   — depends on Phase 1, independent of Phase 2
+Phase 4 (consolidation) — depends on Phase 1, benefits from Phase 3
+Phase 5 (hook)          — independent, can be done anytime after Phase 1
+```
+
+Phases 2 and 3 can run in parallel. Phase 4 should wait until maintenance is running so the graph is clean before consolidation adds complexity.
+
+## Open Questions
+
+**Worker/branch cancellation from the cortex.** The current `CancelTool` operates through `ChannelState`, which is channel-scoped. The cortex doesn't own a channel. Options:
+- Store cancellation tokens in a shared registry (`HashMap<WorkerId, CancellationToken>` in `AgentDeps` or similar)
+- Emit a `ProcessEvent::KillWorker` that the owning channel listens for and acts on
+- Give the cortex direct access to worker handles
+
+**Consolidation frequency.** Fixed interval (every N hours) vs event-driven (consolidate when >N new memories since last run). Event-driven is more efficient but harder to reason about. Could start with a fixed interval and add event-driven triggering later.
+
+**Circuit breaker actions.** The prompt says "disable the failing component" but the mechanism matters:
+- Disable a tool for all workers? (requires the tool server to check a flag)
+- Switch to a fallback model in routing config? (requires writing to `RoutingConfig`)
+- Just log and surface in `system_monitor` output for the consolidation agent to reason about?
+- Starting with logging + surfacing is safest. Active intervention can come later.
+
+**Cortex vs compactor overlap.** The cortex prompt says to flag channels approaching context limits, but the compactor already handles that per-channel. The cortex's role here is probably monitoring/alerting (detect when a compactor is falling behind) rather than direct intervention.
