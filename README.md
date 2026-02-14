@@ -11,8 +11,8 @@
 </p>
 
 <p align="center">
-  <a href="https://www.gnu.org/licenses/agpl-3.0">
-    <img src="https://img.shields.io/static/v1?label=License&message=AGPL%20v3&color=000" />
+  <a href="https://fsl.software/">
+    <img src="https://img.shields.io/static/v1?label=License&message=FSL-1.1-ALv2&color=000" />
   </a>
   <a href="https://github.com/jamiepine/spacebot">
     <img src="https://img.shields.io/static/v1?label=Core&message=Rust&color=DEA584" />
@@ -370,4 +370,4 @@ Contributions welcome. Read [RUST_STYLE_GUIDE.md](RUST_STYLE_GUIDE.md) before wr
 
 ## License
 
-AGPL-3.0 — see [LICENSE](LICENSE) for details.
+FSL-1.1-ALv2 — [Functional Source License](https://fsl.software/), converting to Apache 2.0 after two years. See [LICENSE](LICENSE) for details.
