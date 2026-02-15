@@ -74,17 +74,6 @@ The volume mounts at `/data`, which becomes the `SPACEBOT_DIR`. Contains everyth
 
 Spacebot is an active daemon by design. The cortex ticks on an interval, cron jobs fire on schedules, and messaging adapters hold persistent websocket connections. Every hosted instance is always-on — there is no idle/suspend model.
 
-Approximate per-user infra costs (always-on):
-
-| Tier | Machine Cost/mo | Volume Cost/mo | Total/mo |
-|------|----------------|----------------|----------|
-| Pod (shared-cpu-1x, 512MB, 10GB) | ~$5 | ~$1.50 | ~$6.50 |
-| Outpost (shared-cpu-2x, 1GB, 40GB) | ~$12 | ~$6 | ~$18 |
-| Nebula (performance-2x, 2GB, 80GB) | ~$30 | ~$12 | ~$42 |
-| Titan (performance-4x, 8GB, 250GB) | ~$90 | ~$37.50 | ~$127.50 |
-
-These costs are infrastructure-only, before LLM usage.
-
 ## Control Plane
 
 A separate service that manages the fleet. This is NOT Spacebot — it's a standard web app.
@@ -138,61 +127,36 @@ Option B is better. The webhook adapter already exists in the architecture. Exte
 ### Dashboard Features
 
 **Agent management:**
+
 - Edit SOUL.md, IDENTITY.md, USER.md via a text editor in the browser
 - Create/delete agents (multi-agent support)
 - Configure model routing (which models for channels, workers, cortex)
 
 **Memory browser:**
+
 - Search memories by type, content, date
 - View memory graph (associations, edges)
 - Manual memory CRUD (create, edit, delete)
 - Import memories from files (ingestion pipeline)
 
 **Conversation history:**
+
 - Browse past conversations across all channels
 - View branch and worker activity per conversation
 - Compaction history
 
 **Cron jobs:**
+
 - Create/edit/delete cron jobs
 - View execution history and circuit breaker status
 - Set active hours and delivery targets
 
 **Monitoring:**
+
 - Machine status (running, error)
 - Resource usage (CPU, memory, disk)
 - LLM usage (tokens consumed, cost estimate)
 - Messaging adapter health
-
-## Billing
-
-### Plans
-
-All instances are always-on. Spacebot is an active daemon — there is no idle/suspend tier.
-
-| Plan | Price | Machine | Agents | Storage | Features |
-|------|-------|---------|--------|---------|----------|
-| **Pod** | $19/mo | shared-cpu-1x, 512MB | 1 | 10GB | BYOK, all messaging platforms, daily backups |
-| **Outpost** | $39/mo | shared-cpu-2x, 1GB | 3 | 40GB | Browser workers, priority support |
-| **Nebula** | $79/mo | performance-2x, 2GB | 10 | 80GB | Shared API key pool, usage billing, priority support |
-| **Titan** | $249/mo | performance-4x, 8GB | Unlimited | 250GB | Dedicated support, custom domains, SLA, SSO |
-
-Annual pricing at ~30% discount: Pod $13/mo, Outpost $27/mo, Nebula $55/mo, Titan $174/mo.
-
-All plans support bring-your-own API keys at no markup. Nebula and Titan include a shared key pool where users pay per-token at cost + 20% margin.
-
-### LLM Billing (Shared Keys)
-
-For users who don't want to manage API keys:
-
-- Track token usage per user via SpacebotHook (already reports usage events)
-- Bill monthly at provider cost + 20% margin
-- Set per-user spending limits with automatic pause
-- Dashboard shows real-time usage and projected cost
-
-### Storage Billing
-
-Volume storage beyond plan limits: $0.20/GB/mo. Automatic alerts at 80% capacity.
 
 ## Docker Image
 
@@ -213,58 +177,3 @@ When we push a new Spacebot version:
 2. Control plane rolls out updates to all machines (Fly's machine update API swaps the image)
 3. Machines restart with the new image, volume data persists
 4. Rolling update — process a batch at a time, skip machines that are currently handling active conversations
-
-## Phases
-
-### Phase 1: MVP
-
-Get one user running on Fly with a manually provisioned machine.
-
-- Dockerfile that builds and runs Spacebot
-- Fly App + Machine + Volume provisioned via `fly` CLI
-- Config via environment variables
-- No dashboard — config files edited directly
-- Validates the deployment model works end-to-end
-
-### Phase 2: Control Plane
-
-- User signup with OAuth
-- Onboarding wizard (connect Discord, set identity, pick model)
-- Automated Fly provisioning via Machines API
-- Basic dashboard (agent settings, start/stop)
-- Stripe integration (Pro plan subscription)
-
-### Phase 3: Dashboard
-
-- Memory browser
-- Conversation history viewer
-- Cron job management
-- Identity file editor
-- LLM usage tracking
-
-### Phase 4: Billing and Scale
-
-- Shared API key pool with metered billing
-- Storage expansion and billing
-- Multi-region support (user picks region on signup)
-- Image update rollout automation
-- Monitoring and alerting
-
-### Phase 5: Team Features
-
-- Team accounts with shared billing
-- Multiple agents per account with shared API keys
-- Usage dashboards per agent
-- Admin controls (spending limits, agent templates)
-
-## Open Questions
-
-1. **Region selection** — let users pick or auto-detect from browser geolocation? Volumes are region-pinned, so this is a permanent choice (or requires migration).
-
-2. **Shared Discord bot** — should spacebot.sh provide a shared Discord bot token (users just invite "Spacebot" to their server), or require users to create their own bot? Shared is easier onboarding but means all users share one bot identity.
-
-3. **Backup/export** — users should be able to export their data (memories, conversations, identity files). Fly Volume snapshots handle disaster recovery, but user-facing export needs a download endpoint.
-
-4. **Custom domains** — for the webhook adapter, let users point their own domain at their Spacebot instance. Fly handles TLS automatically.
-
-5. **Browser worker sandboxing** — Chrome in a per-user container is already isolated, but do we need additional sandboxing (seccomp profiles, network restrictions) to prevent abuse?

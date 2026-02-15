@@ -34,9 +34,7 @@ An agent does NOT have its own LLM provider credentials, its own binary, or its 
 │   │   ├── workspace/
 │   │   │   ├── SOUL.md                   # personality, values, boundaries
 │   │   │   ├── IDENTITY.md               # name, nature, vibe
-│   │   │   ├── USER.md                   # info about the human
-│   │   │   └── prompts/                  # optional prompt overrides
-│   │   │       └── CHANNEL.md            # overrides shared prompts/CHANNEL.md
+│   │   │   └── USER.md                   # info about the human
 │   │   ├── data/
 │   │   │   ├── spacebot.db              # SQLite (memories, conversations, cron jobs)
 │   │   │   ├── lancedb/                 # LanceDB (embeddings, FTS)
@@ -45,21 +43,7 @@ An agent does NOT have its own LLM provider credentials, its own binary, or its 
 │   │
 │   └── dev-bot/                          # second agent
 │       ├── workspace/
-│       │   ├── SOUL.md
-│       │   ├── IDENTITY.md
-│       │   └── USER.md
-│       ├── data/
-│       │   ├── spacebot.db
-│       │   ├── lancedb/
-│       │   └── config.redb
-│       └── archives/
-│
-└── prompts/                              # shared default system prompts
-    ├── CHANNEL.md
-    ├── BRANCH.md
-    ├── WORKER.md
-    ├── COMPACTOR.md
-    └── CORTEX.md
+
 ```
 
 Identity files are per-agent. System prompts (CHANNEL.md, BRANCH.md, etc.) are shared across all agents by default — they define process behavior, not personality. An agent can override any prompt by placing a file with the same name in its `workspace/prompts/` directory.
@@ -134,20 +118,20 @@ The `env:` prefix on credential values reads from environment variables at start
 
 ### What's Instance-Level vs Agent-Level
 
-| Setting | Level | Notes |
-|---------|-------|-------|
-| LLM API keys | Instance | Shared credentials for all agents |
-| Messaging credentials | Instance | One Discord bot token for all agents |
-| Messaging bindings | Instance | Routes conversations to agents |
-| Default model/thresholds | Instance | Defaults that agents inherit |
-| Channel model | Agent | Which model this agent's channels use |
-| Worker model | Agent | Which model this agent's workers use |
-| Compaction thresholds | Agent | Override defaults if needed |
-| Cortex config | Agent | Tick interval, timeouts |
-| Identity (SOUL, USER) | Agent | Unique per agent |
-| Memories | Agent | Completely isolated databases |
-| Conversations | Agent | Completely isolated |
-| Settings/secrets | Agent | Per-agent redb |
+| Setting                  | Level    | Notes                                 |
+| ------------------------ | -------- | ------------------------------------- |
+| LLM API keys             | Instance | Shared credentials for all agents     |
+| Messaging credentials    | Instance | One Discord bot token for all agents  |
+| Messaging bindings       | Instance | Routes conversations to agents        |
+| Default model/thresholds | Instance | Defaults that agents inherit          |
+| Channel model            | Agent    | Which model this agent's channels use |
+| Worker model             | Agent    | Which model this agent's workers use  |
+| Compaction thresholds    | Agent    | Override defaults if needed           |
+| Cortex config            | Agent    | Tick interval, timeouts               |
+| Identity (SOUL, USER)    | Agent    | Unique per agent                      |
+| Memories                 | Agent    | Completely isolated databases         |
+| Conversations            | Agent    | Completely isolated                   |
+| Settings/secrets         | Agent    | Per-agent redb                        |
 
 ### Agent Config Resolution
 
@@ -263,6 +247,7 @@ spacebot agents create dev-bot
 Or via config: add an `[[agents]]` entry to config.toml and restart. On next startup, the directories and databases are bootstrapped.
 
 Creation does:
+
 1. Validate ID (lowercase alphanumeric + hyphens, unique)
 2. Create `agents/{id}/workspace/` with template SOUL.md, IDENTITY.md, USER.md
 3. Create `agents/{id}/data/` with empty databases
@@ -275,6 +260,7 @@ spacebot agents delete dev-bot
 ```
 
 Deletion does:
+
 1. Stop the agent's cortex and drain in-flight work
 2. Remove bindings referencing this agent
 3. Optionally trash the agent's directories (workspace, data, archives)
@@ -310,17 +296,17 @@ OpenClaw uses a single JSON5 config file with all agents defined inline. File-ba
 
 Spacebot takes the same conceptual model but adapts it:
 
-| Concern | OpenClaw | Spacebot |
-|---------|----------|----------|
-| Config format | JSON5 | TOML |
-| Memory storage | Markdown files + SQLite index | SQLite + LanceDB (per agent) |
-| Database isolation | File-based (separate dirs) | Database-level (separate SQLite/LanceDB/redb) |
-| Agent management | WebSocket RPC + CLI | CLI + config file |
-| Cortex | N/A | Per-agent cortex |
-| Identity files | Same set | Same set (SOUL, IDENTITY, USER) |
-| Prompt overrides | Skills system | Per-agent prompt directory |
-| Bindings | Config array with match rules | Config array with platform filters |
-| Subagent spawning | Cross-agent tool calls | Future concern |
+| Concern            | OpenClaw                      | Spacebot                                      |
+| ------------------ | ----------------------------- | --------------------------------------------- |
+| Config format      | JSON5                         | TOML                                          |
+| Memory storage     | Markdown files + SQLite index | SQLite + LanceDB (per agent)                  |
+| Database isolation | File-based (separate dirs)    | Database-level (separate SQLite/LanceDB/redb) |
+| Agent management   | WebSocket RPC + CLI           | CLI + config file                             |
+| Cortex             | N/A                           | Per-agent cortex                              |
+| Identity files     | Same set                      | Same set (SOUL, IDENTITY, USER)               |
+| Prompt overrides   | Skills system                 | Per-agent prompt directory                    |
+| Bindings           | Config array with match rules | Config array with platform filters            |
+| Subagent spawning  | Cross-agent tool calls        | Future concern                                |
 
 ## CLI Commands
 
