@@ -1,15 +1,15 @@
 use super::state::ApiState;
 
-use axum::extract::State;
-use axum::http::StatusCode;
 use axum::Json;
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Serialize, Clone)]
 pub(super) struct ModelInfo {
-    /// Full routing string (e.g. "openrouter/anthropic/claude-sonnet-4-20250514")
+    /// Full routing string (e.g. "openrouter/anthropic/claude-sonnet-4")
     id: String,
     /// Human-readable name
     name: String,
@@ -21,11 +21,19 @@ pub(super) struct ModelInfo {
     tool_call: bool,
     /// Whether this model has reasoning/thinking capability
     reasoning: bool,
+    /// Whether this model accepts audio input.
+    input_audio: bool,
 }
 
 #[derive(Serialize)]
 pub(super) struct ModelsResponse {
     models: Vec<ModelInfo>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct ModelsQuery {
+    provider: Option<String>,
+    capability: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -59,7 +67,6 @@ struct ModelsDevLimit {
 
 #[derive(Deserialize)]
 struct ModelsDevModalities {
-    #[allow(dead_code)]
     input: Option<Vec<String>>,
     output: Option<Vec<String>>,
 }
@@ -67,11 +74,21 @@ struct ModelsDevModalities {
 /// Cached model catalog fetched from models.dev.
 static MODELS_CACHE: std::sync::LazyLock<
     tokio::sync::RwLock<(Vec<ModelInfo>, std::time::Instant)>,
-> = std::sync::LazyLock::new(|| {
-    tokio::sync::RwLock::new((Vec::new(), std::time::Instant::now()))
-});
+> = std::sync::LazyLock::new(|| tokio::sync::RwLock::new((Vec::new(), std::time::Instant::now())));
 
 const MODELS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Models known to work with Spacebot's current voice transcription path
+/// (OpenAI-compatible `/v1/chat/completions` with `input_audio`).
+const KNOWN_VOICE_TRANSCRIPTION_MODELS: &[&str] = &[
+    "openrouter/google/gemini-2.0-flash-001",
+    "openrouter/google/gemini-2.5-flash",
+    "openrouter/google/gemini-2.5-flash-lite",
+    "openrouter/google/gemini-2.5-pro",
+    "openrouter/google/gemini-3-flash-preview",
+    "openrouter/google/gemini-3-pro-preview",
+    "openrouter/google/gemini-3.1-pro-preview",
+];
 
 /// Maps models.dev provider IDs to spacebot's internal provider IDs for
 /// providers with direct integrations.
@@ -82,12 +99,17 @@ fn direct_provider_mapping(models_dev_id: &str) -> Option<&'static str> {
         "deepseek" => Some("deepseek"),
         "xai" => Some("xai"),
         "mistral" => Some("mistral"),
+        "gemini" | "google" => Some("gemini"),
         "groq" => Some("groq"),
         "togetherai" => Some("together"),
         "fireworks-ai" => Some("fireworks"),
         "zhipuai" => Some("zhipu"),
         _ => None,
     }
+}
+
+fn is_known_voice_transcription_model(model_id: &str) -> bool {
+    KNOWN_VOICE_TRANSCRIPTION_MODELS.contains(&model_id)
 }
 
 /// Models from providers not in models.dev (private/custom endpoints).
@@ -100,6 +122,7 @@ fn extra_models() -> Vec<ModelInfo> {
             context_window: None,
             tool_call: true,
             reasoning: true,
+            input_audio: false,
         },
         ModelInfo {
             id: "opencode-zen/kimi-k2".into(),
@@ -108,6 +131,7 @@ fn extra_models() -> Vec<ModelInfo> {
             context_window: None,
             tool_call: true,
             reasoning: false,
+            input_audio: false,
         },
         ModelInfo {
             id: "opencode-zen/kimi-k2-thinking".into(),
@@ -116,6 +140,7 @@ fn extra_models() -> Vec<ModelInfo> {
             context_window: None,
             tool_call: true,
             reasoning: true,
+            input_audio: false,
         },
         ModelInfo {
             id: "opencode-zen/glm-5".into(),
@@ -124,6 +149,7 @@ fn extra_models() -> Vec<ModelInfo> {
             context_window: None,
             tool_call: true,
             reasoning: false,
+            input_audio: false,
         },
         ModelInfo {
             id: "opencode-zen/minimax-m2.5".into(),
@@ -132,6 +158,7 @@ fn extra_models() -> Vec<ModelInfo> {
             context_window: None,
             tool_call: true,
             reasoning: false,
+            input_audio: false,
         },
         ModelInfo {
             id: "opencode-zen/qwen3-coder".into(),
@@ -140,6 +167,7 @@ fn extra_models() -> Vec<ModelInfo> {
             context_window: None,
             tool_call: true,
             reasoning: false,
+            input_audio: false,
         },
         ModelInfo {
             id: "opencode-zen/big-pickle".into(),
@@ -148,6 +176,64 @@ fn extra_models() -> Vec<ModelInfo> {
             context_window: None,
             tool_call: true,
             reasoning: false,
+            input_audio: false,
+        },
+        // Z.AI Coding Plan
+        ModelInfo {
+            id: "zai-coding-plan/glm-4.7".into(),
+            name: "GLM 4.7 (Coding)".into(),
+            provider: "zai-coding-plan".into(),
+            context_window: None,
+            tool_call: true,
+            reasoning: false,
+            input_audio: false,
+        },
+        ModelInfo {
+            id: "zai-coding-plan/glm-5".into(),
+            name: "GLM 5 (Coding)".into(),
+            provider: "zai-coding-plan".into(),
+            context_window: None,
+            tool_call: true,
+            reasoning: false,
+            input_audio: false,
+        },
+        ModelInfo {
+            id: "zai-coding-plan/glm-4.5-air".into(),
+            name: "GLM 4.5 Air (Coding)".into(),
+            provider: "zai-coding-plan".into(),
+            context_window: None,
+            tool_call: true,
+            reasoning: false,
+            input_audio: false,
+        },
+        // MiniMax
+        ModelInfo {
+            id: "minimax/MiniMax-M1-80k".into(),
+            name: "MiniMax M1 80K".into(),
+            provider: "minimax".into(),
+            context_window: Some(80000),
+            tool_call: true,
+            reasoning: false,
+            input_audio: false,
+        },
+        // Moonshot AI (Kimi)
+        ModelInfo {
+            id: "moonshot/kimi-k2.5".into(),
+            name: "Kimi K2.5".into(),
+            provider: "moonshot".into(),
+            context_window: None,
+            tool_call: true,
+            reasoning: true,
+            input_audio: false,
+        },
+        ModelInfo {
+            id: "moonshot/moonshot-v1-8k".into(),
+            name: "Moonshot V1 8K".into(),
+            provider: "moonshot".into(),
+            context_window: Some(8000),
+            tool_call: false,
+            reasoning: false,
+            input_audio: false,
         },
     ]
 }
@@ -196,6 +282,11 @@ async fn fetch_models_dev() -> anyhow::Result<Vec<ModelInfo>> {
                 };
 
             let context_window = model.limit.as_ref().map(|l| l.context);
+            let input_audio = model
+                .modalities
+                .as_ref()
+                .and_then(|m| m.input.as_ref())
+                .is_some_and(|inputs| inputs.iter().any(|input| input.to_lowercase().contains("audio")));
 
             models.push(ModelInfo {
                 id: routing_id,
@@ -204,6 +295,7 @@ async fn fetch_models_dev() -> anyhow::Result<Vec<ModelInfo>> {
                 context_window,
                 tool_call: model.tool_call,
                 reasoning: model.reasoning,
+                input_audio,
             });
         }
     }
@@ -250,49 +342,128 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     };
 
     let has_key = |key: &str, env_var: &str| -> bool {
-        if let Some(llm) = doc.get("llm") {
-            if let Some(val) = llm.get(key) {
-                if let Some(s) = val.as_str() {
-                    if let Some(var_name) = s.strip_prefix("env:") {
-                        return std::env::var(var_name).is_ok();
-                    }
-                    return !s.is_empty();
-                }
+        if let Some(llm) = doc.get("llm")
+            && let Some(val) = llm.get(key)
+            && let Some(s) = val.as_str()
+        {
+            if let Some(var_name) = s.strip_prefix("env:") {
+                return std::env::var(var_name).is_ok();
             }
+            return !s.is_empty();
         }
         std::env::var(env_var).is_ok()
     };
 
-    if has_key("anthropic_key", "ANTHROPIC_API_KEY") { providers.push("anthropic"); }
-    if has_key("openai_key", "OPENAI_API_KEY") { providers.push("openai"); }
-    if has_key("openrouter_key", "OPENROUTER_API_KEY") { providers.push("openrouter"); }
-    if has_key("zhipu_key", "ZHIPU_API_KEY") { providers.push("zhipu"); }
-    if has_key("groq_key", "GROQ_API_KEY") { providers.push("groq"); }
-    if has_key("together_key", "TOGETHER_API_KEY") { providers.push("together"); }
-    if has_key("fireworks_key", "FIREWORKS_API_KEY") { providers.push("fireworks"); }
-    if has_key("deepseek_key", "DEEPSEEK_API_KEY") { providers.push("deepseek"); }
-    if has_key("xai_key", "XAI_API_KEY") { providers.push("xai"); }
-    if has_key("mistral_key", "MISTRAL_API_KEY") { providers.push("mistral"); }
-    if has_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY") { providers.push("opencode-zen"); }
+    if has_key("anthropic_key", "ANTHROPIC_API_KEY") {
+        providers.push("anthropic");
+    }
+    if has_key("openai_key", "OPENAI_API_KEY") {
+        providers.push("openai");
+    }
+    if has_key("openrouter_key", "OPENROUTER_API_KEY") {
+        providers.push("openrouter");
+    }
+    if has_key("zhipu_key", "ZHIPU_API_KEY") {
+        providers.push("zhipu");
+    }
+    if has_key("groq_key", "GROQ_API_KEY") {
+        providers.push("groq");
+    }
+    if has_key("together_key", "TOGETHER_API_KEY") {
+        providers.push("together");
+    }
+    if has_key("fireworks_key", "FIREWORKS_API_KEY") {
+        providers.push("fireworks");
+    }
+    if has_key("deepseek_key", "DEEPSEEK_API_KEY") {
+        providers.push("deepseek");
+    }
+    if has_key("xai_key", "XAI_API_KEY") {
+        providers.push("xai");
+    }
+    if has_key("mistral_key", "MISTRAL_API_KEY") {
+        providers.push("mistral");
+    }
+    if has_key("gemini_key", "GEMINI_API_KEY") {
+        providers.push("gemini");
+    }
+    if has_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY") {
+        providers.push("opencode-zen");
+    }
+    if has_key("minimax_key", "MINIMAX_API_KEY") {
+        providers.push("minimax");
+    }
+    if has_key("moonshot_key", "MOONSHOT_API_KEY") {
+        providers.push("moonshot");
+    }
+    if has_key("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY") {
+        providers.push("zai-coding-plan");
+    }
 
     providers
 }
 
 pub(super) async fn get_models(
     State(state): State<Arc<ApiState>>,
+    Query(query): Query<ModelsQuery>,
 ) -> Result<Json<ModelsResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
     let configured = configured_providers(&config_path).await;
+    let requested_provider = query
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty());
+    let requested_capability = query
+        .capability
+        .as_deref()
+        .map(str::trim)
+        .filter(|capability| !capability.is_empty());
 
     let catalog = ensure_models_cache().await;
 
     let mut models: Vec<ModelInfo> = catalog
         .into_iter()
-        .filter(|m| configured.contains(&m.provider.as_str()))
+        .filter(|model| {
+            let provider_match = if let Some(provider) = requested_provider {
+                model.provider == provider
+            } else {
+                configured.contains(&model.provider.as_str())
+            };
+            if !provider_match {
+                return false;
+            }
+
+            if let Some(capability) = requested_capability {
+                return match capability {
+                    "input_audio" => model.input_audio,
+                    "voice_transcription" => {
+                        model.input_audio && is_known_voice_transcription_model(&model.id)
+                    }
+                    _ => true,
+                };
+            }
+
+            true
+        })
         .collect();
 
     for model in extra_models() {
-        if configured.contains(&model.provider.as_str()) {
+        if let Some(capability) = requested_capability {
+            if capability == "input_audio" && !model.input_audio {
+                continue;
+            }
+            if capability == "voice_transcription"
+                && (!model.input_audio || !is_known_voice_transcription_model(&model.id))
+            {
+                continue;
+            }
+        }
+        if let Some(provider) = requested_provider {
+            if model.provider == provider {
+                models.push(model);
+            }
+        } else if configured.contains(&model.provider.as_str()) {
             models.push(model);
         }
     }
@@ -308,5 +479,12 @@ pub(super) async fn refresh_models(
         *cache = (Vec::new(), std::time::Instant::now() - MODELS_CACHE_TTL);
     }
 
-    get_models(State(state)).await
+    get_models(
+        State(state),
+        Query(ModelsQuery {
+            provider: None,
+            capability: None,
+        }),
+    )
+    .await
 }

@@ -8,6 +8,8 @@ interface ModelSelectProps {
   description: string;
   value: string;
   onChange: (value: string) => void;
+  provider?: string;
+  capability?: "input_audio" | "voice_transcription";
 }
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -17,6 +19,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   deepseek: "DeepSeek",
   xai: "xAI",
   mistral: "Mistral",
+  gemini: "Google Gemini",
   groq: "Groq",
   together: "Together AI",
   fireworks: "Fireworks AI",
@@ -36,6 +39,8 @@ export function ModelSelect({
   description,
   value,
   onChange,
+  provider,
+  capability,
 }: ModelSelectProps) {
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState("");
@@ -43,8 +48,8 @@ export function ModelSelect({
   const inputRef = useRef<HTMLInputElement>(null);
 
   const { data } = useQuery({
-    queryKey: ["models"],
-    queryFn: api.models,
+    queryKey: ["models", provider ?? "configured", capability ?? "all"],
+    queryFn: () => api.models(provider, capability),
     staleTime: 60_000,
   });
 
@@ -126,6 +131,7 @@ export function ModelSelect({
     "deepseek",
     "xai",
     "mistral",
+    "gemini",
     "groq",
     "together",
     "fireworks",

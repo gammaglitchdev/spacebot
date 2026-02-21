@@ -384,9 +384,9 @@ impl BrowserTool {
             builder = builder.chrome_executable(path);
         }
 
-        let chrome_config = builder
-            .build()
-            .map_err(|error| BrowserError::new(format!("failed to build browser config: {error}")))?;
+        let chrome_config = builder.build().map_err(|error| {
+            BrowserError::new(format!("failed to build browser config: {error}"))
+        })?;
 
         tracing::info!(
             headless = self.config.headless,
@@ -398,9 +398,7 @@ impl BrowserTool {
             .await
             .map_err(|error| BrowserError::new(format!("failed to launch browser: {error}")))?;
 
-        let handler_task = tokio::spawn(async move {
-            while handler.next().await.is_some() {}
-        });
+        let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
 
         state.browser = Some(browser);
         state._handler_task = Some(handler_task);
@@ -428,7 +426,10 @@ impl BrowserTool {
         state.element_refs.clear();
         state.next_ref = 0;
 
-        Ok(BrowserOutput::success(format!("Navigated to {url}")).with_page_info(title, current_url))
+        Ok(
+            BrowserOutput::success(format!("Navigated to {url}"))
+                .with_page_info(title, current_url),
+        )
     }
 
     async fn handle_open(&self, url: Option<String>) -> Result<BrowserOutput, BrowserError> {
@@ -500,10 +501,7 @@ impl BrowserTool {
         })
     }
 
-    async fn handle_focus(
-        &self,
-        target_id: Option<String>,
-    ) -> Result<BrowserOutput, BrowserError> {
+    async fn handle_focus(&self, target_id: Option<String>) -> Result<BrowserOutput, BrowserError> {
         let Some(target_id) = target_id else {
             return Err(BrowserError::new("target_id is required for focus action"));
         };
@@ -520,9 +518,7 @@ impl BrowserTool {
         state.element_refs.clear();
         state.next_ref = 0;
 
-        Ok(BrowserOutput::success(format!(
-            "Focused tab {target_id}"
-        )))
+        Ok(BrowserOutput::success(format!("Focused tab {target_id}")))
     }
 
     async fn handle_close_tab(
@@ -599,10 +595,7 @@ impl BrowserTool {
             let name = extract_ax_value_string(&node.name);
             let description = extract_ax_value_string(&node.description);
             let value = extract_ax_value_string(&node.value);
-            let backend_node_id = node
-                .backend_dom_node_id
-                .as_ref()
-                .map(|id| id.inner().clone());
+            let backend_node_id = node.backend_dom_node_id.as_ref().map(|id| *id.inner());
 
             let ref_id = format!("e{}", state.next_ref);
             state.next_ref += 1;
@@ -652,9 +645,7 @@ impl BrowserTool {
         key: Option<String>,
     ) -> Result<BrowserOutput, BrowserError> {
         let Some(act_kind) = act_kind else {
-            return Err(BrowserError::new(
-                "act_kind is required for act action",
-            ));
+            return Err(BrowserError::new("act_kind is required for act action"));
         };
 
         let state = self.state.lock().await;
@@ -692,8 +683,7 @@ impl BrowserTool {
                     return Err(BrowserError::new("key is required for act:press_key"));
                 };
                 if element_ref.is_some() {
-                    let element =
-                        self.resolve_element_ref(&state, page, element_ref).await?;
+                    let element = self.resolve_element_ref(&state, page, element_ref).await?;
                     element
                         .press_key(&key)
                         .await
@@ -713,12 +703,9 @@ impl BrowserTool {
             }
             ActKind::ScrollIntoView => {
                 let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                element
-                    .scroll_into_view()
-                    .await
-                    .map_err(|error| {
-                        BrowserError::new(format!("scroll_into_view failed: {error}"))
-                    })?;
+                element.scroll_into_view().await.map_err(|error| {
+                    BrowserError::new(format!("scroll_into_view failed: {error}"))
+                })?;
                 Ok(BrowserOutput::success("Scrolled element into view"))
             }
             ActKind::Focus => {
@@ -745,9 +732,7 @@ impl BrowserTool {
             element
                 .screenshot(CaptureScreenshotFormat::Png)
                 .await
-                .map_err(|error| {
-                    BrowserError::new(format!("element screenshot failed: {error}"))
-                })?
+                .map_err(|error| BrowserError::new(format!("element screenshot failed: {error}")))?
         } else {
             let params = ScreenshotParams::builder()
                 .format(CaptureScreenshotFormat::Png)
@@ -793,10 +778,7 @@ impl BrowserTool {
         })
     }
 
-    async fn handle_evaluate(
-        &self,
-        script: Option<String>,
-    ) -> Result<BrowserOutput, BrowserError> {
+    async fn handle_evaluate(&self, script: Option<String>) -> Result<BrowserOutput, BrowserError> {
         if !self.config.evaluate_enabled {
             return Err(BrowserError::new(
                 "JavaScript evaluation is disabled in browser config (set evaluate_enabled = true)",
@@ -804,9 +786,7 @@ impl BrowserTool {
         }
 
         let Some(script) = script else {
-            return Err(BrowserError::new(
-                "script is required for evaluate action",
-            ));
+            return Err(BrowserError::new("script is required for evaluate action"));
         };
 
         let state = self.state.lock().await;
@@ -871,10 +851,10 @@ impl BrowserTool {
     async fn handle_close(&self) -> Result<BrowserOutput, BrowserError> {
         let mut state = self.state.lock().await;
 
-        if let Some(mut browser) = state.browser.take() {
-            if let Err(error) = browser.close().await {
-                tracing::warn!(%error, "browser close returned error");
-            }
+        if let Some(mut browser) = state.browser.take()
+            && let Err(error) = browser.close().await
+        {
+            tracing::warn!(%error, "browser close returned error");
         }
 
         state.pages.clear();
@@ -893,11 +873,10 @@ impl BrowserTool {
         state: &'a mut BrowserState,
         url: Option<&str>,
     ) -> Result<&'a chromiumoxide::Page, BrowserError> {
-        if state.active_target.is_some() {
-            let target = state.active_target.as_ref().expect("checked above");
-            if state.pages.contains_key(target) {
-                return Ok(&state.pages[target]);
-            }
+        if let Some(target) = state.active_target.as_ref()
+            && state.pages.contains_key(target)
+        {
+            return Ok(&state.pages[target]);
         }
 
         let browser = state
@@ -942,9 +921,7 @@ impl BrowserTool {
         element_ref: Option<String>,
     ) -> Result<chromiumoxide::Element, BrowserError> {
         let Some(ref_id) = element_ref else {
-            return Err(BrowserError::new(
-                "element_ref is required for this action",
-            ));
+            return Err(BrowserError::new("element_ref is required for this action"));
         };
 
         let elem_ref = state.element_refs.get(&ref_id).ok_or_else(|| {
@@ -966,10 +943,7 @@ impl BrowserTool {
 }
 
 /// Dispatch a key press event to the page via CDP Input domain.
-async fn dispatch_key_press(
-    page: &chromiumoxide::Page,
-    key: &str,
-) -> Result<(), BrowserError> {
+async fn dispatch_key_press(page: &chromiumoxide::Page, key: &str) -> Result<(), BrowserError> {
     let key_down = DispatchKeyEventParams::builder()
         .r#type(DispatchKeyEventType::KeyDown)
         .key(key)

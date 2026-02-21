@@ -41,6 +41,10 @@ struct SlackAdapterState {
     /// Maps slash command string (e.g. `"/ask"`) → agent_id.
     /// Built once at start() from the config; read-only afterwards.
     commands: Arc<HashMap<String, String>>,
+    /// Cache of resolved user identities to avoid repeated `users.info` API calls.
+    user_identity_cache: Arc<RwLock<HashMap<String, SlackUserIdentity>>>,
+    /// Cache of resolved channel names to avoid repeated `conversations.info` API calls.
+    channel_name_cache: Arc<RwLock<HashMap<String, String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,11 +79,9 @@ impl SlackAdapter {
         commands: Vec<SlackCommandConfig>,
     ) -> anyhow::Result<Self> {
         let bot_token = bot_token.into();
-        let client = Arc::new(
-            SlackClient::new(
-                SlackClientHyperConnector::new().context("failed to create slack HTTP connector")?,
-            ),
-        );
+        let client = Arc::new(SlackClient::new(
+            SlackClientHyperConnector::new().context("failed to create slack HTTP connector")?,
+        ));
         let token = SlackApiToken::new(SlackApiTokenValue(bot_token.clone()));
         let commands_map: HashMap<String, String> = commands
             .into_iter()
@@ -166,25 +168,26 @@ async fn handle_message_event(
         if perms.dm_allowed_users.is_empty() {
             return Ok(());
         }
-        if let Some(ref uid) = user_id {
-            if !perms.dm_allowed_users.contains(uid) {
-                return Ok(());
-            }
+        if let Some(ref uid) = user_id
+            && !perms.dm_allowed_users.contains(uid)
+        {
+            return Ok(());
         }
     }
 
     // Workspace filter
-    if let Some(ref filter) = perms.workspace_filter {
-        if !filter.contains(&team_id_str) {
-            return Ok(());
-        }
+    if let Some(ref filter) = perms.workspace_filter
+        && !filter.contains(&team_id_str)
+    {
+        return Ok(());
     }
 
     // Channel filter
-    if let Some(allowed) = perms.channel_filter.get(&team_id_str) {
-        if !allowed.is_empty() && !allowed.contains(&channel_id) {
-            return Ok(());
-        }
+    if let Some(allowed) = perms.channel_filter.get(&team_id_str)
+        && !allowed.is_empty()
+        && !allowed.contains(&channel_id)
+    {
+        return Ok(());
     }
 
     let conversation_id = if let Some(ref thread_ts) = msg_event.origin.thread_ts {
@@ -204,6 +207,8 @@ async fn handle_message_event(
         msg_event.sender.user.as_ref(),
         &client,
         &adapter_state.bot_token,
+        &adapter_state.user_identity_cache,
+        &adapter_state.channel_name_cache,
     )
     .await;
 
@@ -250,17 +255,18 @@ async fn handle_app_mention_event(
     let perms = adapter_state.permissions.load();
 
     // Workspace filter applies to mentions too
-    if let Some(ref filter) = perms.workspace_filter {
-        if !filter.contains(&team_id_str) {
-            return Ok(());
-        }
+    if let Some(ref filter) = perms.workspace_filter
+        && !filter.contains(&team_id_str)
+    {
+        return Ok(());
     }
 
     // Channel filter — same logic as handle_message_event
-    if let Some(allowed) = perms.channel_filter.get(&team_id_str) {
-        if !allowed.is_empty() && !allowed.contains(&channel_id) {
-            return Ok(());
-        }
+    if let Some(allowed) = perms.channel_filter.get(&team_id_str)
+        && !allowed.is_empty()
+        && !allowed.contains(&channel_id)
+    {
+        return Ok(());
     }
 
     let conversation_id = if let Some(ref thread_ts) = mention.origin.thread_ts {
@@ -284,6 +290,8 @@ async fn handle_app_mention_event(
         Some(&slack_uid),
         &client,
         &adapter_state.bot_token,
+        &adapter_state.user_identity_cache,
+        &adapter_state.channel_name_cache,
     )
     .await;
 
@@ -346,32 +354,33 @@ async fn handle_command_event(
     {
         let perms = adapter_state.permissions.load();
 
-        if let Some(ref filter) = perms.workspace_filter {
-            if !filter.contains(&team_id) {
-                tracing::debug!(
-                    team_id = %team_id,
-                    command = %command_str,
-                    "slash command from unauthorized workspace — dropping"
-                );
-                return Ok(SlackCommandEventResponse {
-                    content: SlackMessageContent::new(),
-                    response_type: Some(SlackMessageResponseType::Ephemeral),
-                });
-            }
+        if let Some(ref filter) = perms.workspace_filter
+            && !filter.contains(&team_id)
+        {
+            tracing::debug!(
+                team_id = %team_id,
+                command = %command_str,
+                "slash command from unauthorized workspace — dropping"
+            );
+            return Ok(SlackCommandEventResponse {
+                content: SlackMessageContent::new(),
+                response_type: Some(SlackMessageResponseType::Ephemeral),
+            });
         }
 
-        if let Some(allowed) = perms.channel_filter.get(&team_id) {
-            if !allowed.is_empty() && !allowed.contains(&channel_id) {
-                tracing::debug!(
-                    channel_id = %channel_id,
-                    command = %command_str,
-                    "slash command from unauthorized channel — dropping"
-                );
-                return Ok(SlackCommandEventResponse {
-                    content: SlackMessageContent::new(),
-                    response_type: Some(SlackMessageResponseType::Ephemeral),
-                });
-            }
+        if let Some(allowed) = perms.channel_filter.get(&team_id)
+            && !allowed.is_empty()
+            && !allowed.contains(&channel_id)
+        {
+            tracing::debug!(
+                channel_id = %channel_id,
+                command = %command_str,
+                "slash command from unauthorized channel — dropping"
+            );
+            return Ok(SlackCommandEventResponse {
+                content: SlackMessageContent::new(),
+                response_type: Some(SlackMessageResponseType::Ephemeral),
+            });
         }
     }
 
@@ -382,8 +391,10 @@ async fn handle_command_event(
             "slash command not configured — ignoring"
         );
         return Ok(SlackCommandEventResponse {
-            content: SlackMessageContent::new()
-                .with_text(format!("`{}` is not configured on this Spacebot instance.", command_str)),
+            content: SlackMessageContent::new().with_text(format!(
+                "`{}` is not configured on this Spacebot instance.",
+                command_str
+            )),
             response_type: Some(SlackMessageResponseType::Ephemeral),
         });
     }
@@ -393,18 +404,36 @@ async fn handle_command_event(
     let conversation_id = format!("slack:{}:{}", team_id, channel_id);
 
     let mut metadata = HashMap::new();
-    metadata.insert("slack_workspace_id".into(), serde_json::Value::String(team_id.clone()));
-    metadata.insert("slack_channel_id".into(), serde_json::Value::String(channel_id.clone()));
-    metadata.insert("slack_user_id".into(), serde_json::Value::String(user_id.clone()));
-    metadata.insert("sender_id".into(), serde_json::Value::String(user_id.clone()));
-    metadata.insert("slack_command".into(), serde_json::Value::String(command_str.clone()));
+    metadata.insert(
+        "slack_workspace_id".into(),
+        serde_json::Value::String(team_id.clone()),
+    );
+    metadata.insert(
+        "slack_channel_id".into(),
+        serde_json::Value::String(channel_id.clone()),
+    );
+    metadata.insert(
+        "slack_user_id".into(),
+        serde_json::Value::String(user_id.clone()),
+    );
+    metadata.insert(
+        "sender_id".into(),
+        serde_json::Value::String(user_id.clone()),
+    );
+    metadata.insert(
+        "slack_command".into(),
+        serde_json::Value::String(command_str.clone()),
+    );
     metadata.insert(
         "slack_user_mention".into(),
         serde_json::Value::String(format!("<@{}>", user_id)),
     );
     // Embed the agent_id hint so the router can honour command-specific routing
     // without requiring a separate binding entry per command.
-    metadata.insert("slack_command_agent_id".into(), serde_json::Value::String(agent_id));
+    metadata.insert(
+        "slack_command_agent_id".into(),
+        serde_json::Value::String(agent_id),
+    );
 
     let content = MessageContent::Text(format!("{} {}", command_str, text).trim().to_string());
 
@@ -470,26 +499,26 @@ async fn handle_interaction_event(
     {
         let perms = adapter_state.permissions.load();
 
-        if let Some(ref filter) = perms.workspace_filter {
-            if !filter.contains(&team_id) {
-                tracing::debug!(
-                    team_id = %team_id,
-                    "block_actions interaction from unauthorized workspace — dropping"
-                );
-                return Ok(());
-            }
+        if let Some(ref filter) = perms.workspace_filter
+            && !filter.contains(&team_id)
+        {
+            tracing::debug!(
+                team_id = %team_id,
+                "block_actions interaction from unauthorized workspace — dropping"
+            );
+            return Ok(());
         }
 
-        if !channel_id.is_empty() {
-            if let Some(allowed) = perms.channel_filter.get(&team_id) {
-                if !allowed.is_empty() && !allowed.contains(&channel_id) {
-                    tracing::debug!(
-                        channel_id = %channel_id,
-                        "block_actions interaction from unauthorized channel — dropping"
-                    );
-                    return Ok(());
-                }
-            }
+        if !channel_id.is_empty()
+            && let Some(allowed) = perms.channel_filter.get(&team_id)
+            && !allowed.is_empty()
+            && !allowed.contains(&channel_id)
+        {
+            tracing::debug!(
+                channel_id = %channel_id,
+                "block_actions interaction from unauthorized channel — dropping"
+            );
+            return Ok(());
         }
     }
 
@@ -522,18 +551,15 @@ async fn handle_interaction_event(
         let action_id = action.action_id.0.clone();
         let block_id = action.block_id.as_ref().map(|b| b.0.clone());
         let value = action.value.clone();
-        let label = action
-            .selected_option
-            .as_ref()
-            .and_then(|o| match &o.text {
-                SlackBlockText::Plain(pt) => Some(pt.text.clone()),
-                SlackBlockText::MarkDown(md) => Some(md.text.clone()),
-            });
+        let label = action.selected_option.as_ref().map(|o| match &o.text {
+            SlackBlockText::Plain(pt) => pt.text.clone(),
+            SlackBlockText::MarkDown(md) => md.text.clone(),
+        });
 
         let content = MessageContent::Interaction {
             action_id: action_id.clone(),
             block_id: block_id.clone(),
-            value: value.clone(),
+            values: value.map(|v| vec![v]).unwrap_or_default(),
             label: label.clone(),
             message_ts: message_ts.clone(),
         };
@@ -546,21 +572,45 @@ async fn handle_interaction_event(
         };
 
         let mut metadata = HashMap::new();
-        metadata.insert("slack_workspace_id".into(), serde_json::Value::String(team_id.clone()));
-        metadata.insert("slack_channel_id".into(), serde_json::Value::String(channel_id.clone()));
-        metadata.insert("slack_user_id".into(), serde_json::Value::String(user_id.clone()));
-        metadata.insert("sender_id".into(), serde_json::Value::String(user_id.clone()));
+        metadata.insert(
+            "slack_workspace_id".into(),
+            serde_json::Value::String(team_id.clone()),
+        );
+        metadata.insert(
+            "slack_channel_id".into(),
+            serde_json::Value::String(channel_id.clone()),
+        );
+        metadata.insert(
+            "slack_user_id".into(),
+            serde_json::Value::String(user_id.clone()),
+        );
+        metadata.insert(
+            "sender_id".into(),
+            serde_json::Value::String(user_id.clone()),
+        );
         metadata.insert(
             "slack_user_mention".into(),
             serde_json::Value::String(format!("<@{}>", user_id)),
         );
         if let Some(ref ts) = message_ts {
-            metadata.insert("slack_thread_ts".into(), serde_json::Value::String(ts.clone()));
-            metadata.insert("slack_message_ts".into(), serde_json::Value::String(ts.clone()));
+            metadata.insert(
+                "slack_thread_ts".into(),
+                serde_json::Value::String(ts.clone()),
+            );
+            metadata.insert(
+                "slack_message_ts".into(),
+                serde_json::Value::String(ts.clone()),
+            );
         }
-        metadata.insert("slack_action_id".into(), serde_json::Value::String(action_id));
+        metadata.insert(
+            "slack_action_id".into(),
+            serde_json::Value::String(action_id),
+        );
         if let Some(ref bid) = block_id {
-            metadata.insert("slack_block_id".into(), serde_json::Value::String(bid.clone()));
+            metadata.insert(
+                "slack_block_id".into(),
+                serde_json::Value::String(bid.clone()),
+            );
         }
 
         let inbound = InboundMessage {
@@ -613,6 +663,8 @@ impl Messaging for SlackAdapter {
             bot_token: self.bot_token.clone(),
             bot_user_id,
             commands: self.commands.clone(),
+            user_identity_cache: Arc::new(RwLock::new(HashMap::new())),
+            channel_name_cache: Arc::new(RwLock::new(HashMap::new())),
         });
 
         let callbacks = SlackSocketModeListenerCallbacks::new()
@@ -623,17 +675,16 @@ impl Messaging for SlackAdapter {
         // The socket mode listener needs its own client instance — it manages
         // a persistent WebSocket connection internally and owns that client for
         // the lifetime of the connection. The shared `self.client` is for REST calls.
-        let listener_client = Arc::new(
-            SlackClient::new(
-                SlackClientHyperConnector::new()
-                    .context("failed to create slack socket mode connector")?,
-            ),
-        );
+        let _listener_client = Arc::new(SlackClient::new(
+            SlackClientHyperConnector::new()
+                .context("failed to create slack socket mode connector")?,
+        ));
 
         // The socket mode listener needs its own client — it owns a persistent
         // WebSocket connection. The shared self.client is for REST calls only.
         let listener_client = Arc::new(SlackClient::new(
-            SlackClientHyperConnector::new().context("failed to create slack socket mode connector")?,
+            SlackClientHyperConnector::new()
+                .context("failed to create slack socket mode connector")?,
         ));
 
         let listener_environment = Arc::new(
@@ -754,7 +805,6 @@ impl Messaging for SlackAdapter {
                         .context("failed to send slack message")?;
                 }
             }
-
             OutboundResponse::ThreadReply {
                 thread_name: _,
                 text,
@@ -854,7 +904,7 @@ impl Messaging for SlackAdapter {
                     .context("failed to send slack ephemeral message")?;
             }
 
-            OutboundResponse::RichMessage { text, blocks } => {
+            OutboundResponse::RichMessage { text, blocks, .. } => {
                 let thread_ts = extract_thread_ts(message);
                 let attempted = blocks.len();
                 let slack_blocks = deserialize_blocks(&blocks);
@@ -981,7 +1031,7 @@ impl Messaging for SlackAdapter {
                         .context("failed to broadcast slack message")?;
                 }
             }
-            OutboundResponse::RichMessage { text, blocks } => {
+            OutboundResponse::RichMessage { text, blocks, .. } => {
                 let slack_blocks = deserialize_blocks(&blocks);
                 let content = if slack_blocks.is_empty() {
                     SlackMessageContent::new().with_text(text)
@@ -1067,11 +1117,10 @@ impl Messaging for SlackAdapter {
                 let author = if is_bot {
                     "bot".to_string()
                 } else if let Some(uid) = user_id {
-                    let display_name = user_identity_by_id
+                    user_identity_by_id
                         .get(&uid)
                         .map(|i| i.display_name.clone())
-                        .unwrap_or_else(|| uid.clone());
-                    format!("{display_name} (<@{uid}>)")
+                        .unwrap_or_else(|| uid.clone())
                 } else {
                     "unknown".to_string()
                 };
@@ -1204,6 +1253,8 @@ async fn build_metadata_and_author(
     slack_user_id: Option<&SlackUserId>,
     client: &Arc<SlackHyperClient>,
     bot_token: &str,
+    user_identity_cache: &Arc<RwLock<HashMap<String, SlackUserIdentity>>>,
+    channel_name_cache: &Arc<RwLock<HashMap<String, String>>>,
 ) -> (HashMap<String, serde_json::Value>, Option<String>) {
     let mut metadata = HashMap::new();
 
@@ -1239,27 +1290,89 @@ async fn build_metadata_and_author(
         );
     }
 
-    // Resolve display name and username
+    let token = SlackApiToken::new(SlackApiTokenValue(bot_token.to_string()));
+    let session = client.open_session(&token);
+
+    // Resolve channel name via cache or conversations.info API.
+    if let Some(name) = channel_name_cache.read().await.get(channel_id).cloned() {
+        metadata.insert("slack_channel_name".into(), serde_json::Value::String(name));
+    } else {
+        match session
+            .conversations_info(&SlackApiConversationsInfoRequest::new(SlackChannelId(
+                channel_id.to_string(),
+            )))
+            .await
+        {
+            Ok(channel_info) => {
+                if let Some(name) = channel_info.channel.name {
+                    channel_name_cache
+                        .write()
+                        .await
+                        .insert(channel_id.to_string(), name.clone());
+                    metadata.insert("slack_channel_name".into(), serde_json::Value::String(name));
+                }
+            }
+            // DM channels (D-prefixed) don't support conversations.info in all cases
+            Err(error) if !channel_id.starts_with('D') => {
+                tracing::warn!(
+                    %error,
+                    channel_id = %channel_id,
+                    "failed to resolve Slack channel name; verify channels:read scope"
+                );
+            }
+            Err(_) => {}
+        }
+    }
+
+    // Resolve user identity via cache or users.info API.
     let mut formatted_author = user_id.map(|u| u.to_string());
 
     if let Some(uid) = slack_user_id {
-        let token = SlackApiToken::new(SlackApiTokenValue(bot_token.to_string()));
-        let session = client.open_session(&token);
-        if let Ok(user_info) = session
+        let cached = user_identity_cache.read().await.get(&uid.0).cloned();
+        let identity = if let Some(identity) = cached {
+            Some(identity)
+        } else if let Ok(user_info) = session
             .users_info(&SlackApiUsersInfoRequest::new(uid.clone()))
             .await
         {
             let identity = resolve_slack_user_identity(&user_info.user, &uid.0);
-            let display_with_mention = format!("{} (<@{}>)", identity.display_name, uid.0);
+            user_identity_cache
+                .write()
+                .await
+                .insert(uid.0.clone(), identity.clone());
+            Some(identity)
+        } else {
+            None
+        };
+
+        if let Some(identity) = identity {
             metadata.insert(
                 "sender_display_name".into(),
-                serde_json::Value::String(display_with_mention.clone()),
+                serde_json::Value::String(identity.display_name.clone()),
             );
-            if let Some(name) = identity.username {
-                metadata.insert("sender_username".into(), serde_json::Value::String(name));
+            metadata.insert(
+                "slack_user_mention".into(),
+                serde_json::Value::String(format!("<@{}>", uid.0)),
+            );
+            if let Some(ref name) = identity.username {
+                metadata.insert(
+                    "sender_username".into(),
+                    serde_json::Value::String(name.clone()),
+                );
             }
-            formatted_author = Some(display_with_mention);
+            formatted_author = Some(identity.display_name.clone());
         }
+    }
+
+    // For DMs without a resolved channel name, use the sender's display name.
+    if channel_id.starts_with('D')
+        && !metadata.contains_key("slack_channel_name")
+        && let Some(display_name) = metadata.get("sender_display_name").and_then(|v| v.as_str())
+    {
+        metadata.insert(
+            "slack_channel_name".into(),
+            serde_json::Value::String(format!("dm-{display_name}")),
+        );
     }
 
     (metadata, formatted_author)
@@ -1314,7 +1427,9 @@ fn deserialize_blocks(values: &[serde_json::Value]) -> Vec<SlackBlock> {
 /// simple prefix strip is sufficient — no case-folding is needed.
 fn strip_bot_mention(text: &str, bot_user_id: &str) -> String {
     let mention = format!("<@{}>", bot_user_id);
-    text.trim_start_matches(mention.as_str()).trim_start().to_string()
+    text.trim_start_matches(mention.as_str())
+        .trim_start()
+        .to_string()
 }
 
 /// Return a short human-readable name for an `OutboundResponse` variant for log messages.

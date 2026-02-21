@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type AgentConfigResponse, type AgentConfigUpdateRequest } from "@/api/client";
-import { Button, SettingSidebarButton, Input, TextArea, Toggle, NumberStepper, cx } from "@/ui";
+import { Button, SettingSidebarButton, Input, TextArea, Toggle, NumberStepper, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, cx } from "@/ui";
 import { ModelSelect } from "@/components/ModelSelect";
 import { Markdown } from "@/components/Markdown";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSearch, useNavigate } from "@tanstack/react-router";
 
+
+function supportsAdaptiveThinking(modelId: string): boolean {
+	const id = modelId.toLowerCase();
+	return id.includes("opus-4-6") || id.includes("opus-4.6")
+		|| id.includes("sonnet-4-6") || id.includes("sonnet-4.6");
+}
 
 type SectionId = "soul" | "identity" | "user" | "routing" | "tuning" | "compaction" | "cortex" | "coalesce" | "memory" | "browser";
 
@@ -20,7 +26,7 @@ const SECTIONS: {
 	{ id: "soul", label: "Soul", group: "identity", description: "SOUL.md", detail: "Defines the agent's personality, values, communication style, and behavioral boundaries. This is the core of who the agent is." },
 	{ id: "identity", label: "Identity", group: "identity", description: "IDENTITY.md", detail: "The agent's name, nature, and purpose. How it introduces itself and what it understands its role to be." },
 	{ id: "user", label: "User", group: "identity", description: "USER.md", detail: "Information about the human this agent interacts with. Name, preferences, context, and anything that helps the agent personalize responses." },
-	{ id: "routing", label: "Model Routing", group: "config", description: "Which models each process uses", detail: "Controls which LLM model is used for each process type. Channels handle user-facing conversation, branches do thinking, workers execute tasks, the compactor summarizes context, and the cortex observes system state." },
+	{ id: "routing", label: "Model Routing", group: "config", description: "Which models each process uses", detail: "Controls which LLM model is used for each process type. Channels handle user-facing conversation, branches do thinking, workers execute tasks, the compactor summarizes context, cortex observes system state, and voice transcribes audio attachments before the channel turn." },
 	{ id: "tuning", label: "Tuning", group: "config", description: "Turn limits, context window, branches", detail: "Core limits that control how much work the agent does per message. Max turns caps LLM iterations per channel message. Context window sets the token budget. Branch limits control parallel thinking." },
 	{ id: "compaction", label: "Compaction", group: "config", description: "Context compaction thresholds", detail: "Thresholds that trigger context summarization as the conversation grows. Background kicks in early, aggressive compresses harder, and emergency truncates without LLM involvement. All values are fractions of the context window." },
 	{ id: "cortex", label: "Cortex", group: "config", description: "System observer settings", detail: "The cortex monitors active processes and generates memory bulletins. Tick interval controls observation frequency. Timeouts determine when stuck workers or branches get cancelled. The circuit breaker auto-disables after consecutive failures." },
@@ -485,39 +491,48 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 
 	const renderFields = () => {
 		switch (sectionId) {
-			case "routing":
+			case "routing": {
+				const modelSlots = [
+					{ key: "channel", label: "Channel Model", description: "Model for user-facing channels" },
+					{ key: "branch", label: "Branch Model", description: "Model for thinking branches" },
+					{ key: "worker", label: "Worker Model", description: "Model for task workers" },
+					{ key: "compactor", label: "Compactor Model", description: "Model for summarization" },
+					{ key: "cortex", label: "Cortex Model", description: "Model for system observation" },
+					{ key: "voice", label: "Voice Model", description: "Model for transcribing audio attachments" },
+				];
 				return (
 					<div className="grid gap-4">
-						<ModelSelect
-							label="Channel Model"
-							description="Model for user-facing channels"
-							value={localValues.channel as string}
-							onChange={(v) => handleChange("channel", v)}
-						/>
-						<ModelSelect
-							label="Branch Model"
-							description="Model for thinking branches"
-							value={localValues.branch as string}
-							onChange={(v) => handleChange("branch", v)}
-						/>
-						<ModelSelect
-							label="Worker Model"
-							description="Model for task workers"
-							value={localValues.worker as string}
-							onChange={(v) => handleChange("worker", v)}
-						/>
-						<ModelSelect
-							label="Compactor Model"
-							description="Model for summarization"
-							value={localValues.compactor as string}
-							onChange={(v) => handleChange("compactor", v)}
-						/>
-						<ModelSelect
-							label="Cortex Model"
-							description="Model for system observation"
-							value={localValues.cortex as string}
-							onChange={(v) => handleChange("cortex", v)}
-						/>
+						{modelSlots.map(({ key, label, description }) => (
+							<div key={key} className="flex flex-col gap-2">
+								<ModelSelect
+									label={label}
+									description={description}
+									value={localValues[key] as string}
+									onChange={(v) => handleChange(key, v)}
+									capability={key === "voice" ? "voice_transcription" : undefined}
+								/>
+								{supportsAdaptiveThinking(localValues[key] as string) && (
+									<div className="ml-4 flex flex-col gap-1">
+										<label className="text-xs font-medium text-ink-dull">Thinking Effort</label>
+										<Select
+											value={(localValues[`${key}_thinking_effort`] as string) || "auto"}
+											onValueChange={(value) => handleChange(`${key}_thinking_effort`, value)}
+										>
+											<SelectTrigger className="border-app-line/50 bg-app-darkBox/30">
+												<SelectValue />
+											</SelectTrigger>
+											<SelectContent>
+												<SelectItem value="auto">Auto</SelectItem>
+												<SelectItem value="max">Max</SelectItem>
+												<SelectItem value="high">High</SelectItem>
+												<SelectItem value="medium">Medium</SelectItem>
+												<SelectItem value="low">Low</SelectItem>
+											</SelectContent>
+										</Select>
+									</div>
+								)}
+							</div>
+						))}
 						<NumberStepper
 							label="Rate Limit Cooldown"
 							description="Seconds to deprioritize rate-limited models"
@@ -528,6 +543,7 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 						/>
 					</div>
 				);
+			}
 			case "tuning":
 				return (
 					<div className="grid gap-4">

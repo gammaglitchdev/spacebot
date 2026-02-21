@@ -6,19 +6,22 @@ use crate::{Attachment, InboundMessage, MessageContent, OutboundResponse, Status
 
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
+use teloxide::Bot;
 use teloxide::payloads::setters::*;
 use teloxide::requests::{Request, Requester};
 use teloxide::types::{
-    ChatAction, ChatId, FileId, InputFile, MediaKind, MessageId, MessageKind, ReactionType,
-    ReplyParameters, UpdateKind, UserId,
+    ChatAction, ChatId, FileId, InputFile, InputPollOption, MediaKind, MessageId, MessageKind,
+    ReactionType, ReplyParameters, UpdateKind, UserId,
 };
-use teloxide::Bot;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{RwLock, mpsc};
 use tokio::task::JoinHandle;
+
+/// Maximum number of rejected DM users to remember.
+const REJECTED_USERS_CAPACITY: usize = 50;
 
 /// Telegram adapter state.
 pub struct TelegramAdapter {
@@ -48,10 +51,7 @@ const MAX_MESSAGE_LENGTH: usize = 4096;
 const STREAM_EDIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
 
 impl TelegramAdapter {
-    pub fn new(
-        token: impl Into<String>,
-        permissions: Arc<ArcSwap<TelegramPermissions>>,
-    ) -> Self {
+    pub fn new(token: impl Into<String>, permissions: Arc<ArcSwap<TelegramPermissions>>) -> Self {
         let token = token.into();
         let bot = Bot::new(&token);
         Self {
@@ -124,6 +124,10 @@ impl Messaging for TelegramAdapter {
 
         tokio::spawn(async move {
             let mut offset = 0i32;
+            // Track users whose DMs were rejected so we can nudge them when they're allowed.
+            let mut rejected_users: VecDeque<(ChatId, i64)> = VecDeque::new();
+            // Snapshot the current allow list so we can detect changes.
+            let mut last_allowed: Vec<i64> = permissions.load().dm_allowed_users.clone();
 
             loop {
                 tokio::select! {
@@ -141,8 +145,39 @@ impl Messaging for TelegramAdapter {
                             }
                         };
 
+                        // Check if the allow list changed and nudge newly-allowed users.
+                        let current_permissions = permissions.load();
+                        if current_permissions.dm_allowed_users != last_allowed {
+                            let newly_allowed: Vec<i64> = current_permissions.dm_allowed_users.iter()
+                                .filter(|id| !last_allowed.contains(id))
+                                .copied()
+                                .collect();
+
+                            if !newly_allowed.is_empty() {
+                                // Notify rejected users who are now allowed.
+                                let mut remaining = VecDeque::new();
+                                for (chat_id, user_id) in rejected_users.drain(..) {
+                                    if newly_allowed.contains(&user_id) {
+                                        tracing::info!(
+                                            user_id,
+                                            "notifying previously rejected user they are now allowed"
+                                        );
+                                        let _ = bot.send_message(
+                                            chat_id,
+                                            "You've been added to the allow list — send me a message!",
+                                        ).send().await;
+                                    } else {
+                                        remaining.push_back((chat_id, user_id));
+                                    }
+                                }
+                                rejected_users = remaining;
+                            }
+
+                            last_allowed = current_permissions.dm_allowed_users.clone();
+                        }
+
                         for update in updates {
-                            offset = update.id.as_offset() as i32;
+                            offset = update.id.as_offset();
 
                             let message = match &update.kind {
                                 UpdateKind::Message(message) => message,
@@ -152,11 +187,10 @@ impl Messaging for TelegramAdapter {
                             let bot_id = *bot_user_id.read().await;
 
                             // Skip our own messages
-                            if let Some(from) = &message.from {
-                                if bot_id.is_some_and(|id| from.id == id) {
+                            if let Some(from) = &message.from
+                                && bot_id.is_some_and(|id| from.id == id) {
                                     continue;
                                 }
-                            }
 
                             let permissions = permissions.load();
 
@@ -165,29 +199,41 @@ impl Messaging for TelegramAdapter {
 
                             // DM filter: in private chats, check dm_allowed_users
                             if is_private {
-                                if let Some(from) = &message.from {
-                                    if !permissions.dm_allowed_users.is_empty()
+                                if let Some(from) = &message.from
+                                    && !permissions.dm_allowed_users.is_empty()
                                         && !permissions
                                             .dm_allowed_users
                                             .contains(&(from.id.0 as i64))
                                     {
+                                        // Remember this user so we can nudge them if they're added later.
+                                        let entry = (message.chat.id, from.id.0 as i64);
+                                        if !rejected_users.iter().any(|(_, uid)| *uid == entry.1) {
+                                            if rejected_users.len() >= REJECTED_USERS_CAPACITY {
+                                                rejected_users.pop_front();
+                                            }
+                                            rejected_users.push_back(entry);
+                                        }
                                         continue;
                                     }
-                                }
                             } else if let Some(filter) = &permissions.chat_filter {
                                 // Chat filter: if configured, only allow listed group/channel chats
                                 if !filter.contains(&chat_id) {
+                                    tracing::debug!(
+                                        chat_id,
+                                        ?filter,
+                                        "telegram message rejected by chat filter"
+                                    );
                                     continue;
                                 }
                             }
 
                             // Extract text content
-                            let text = extract_text(&message);
-                            if text.is_none() && !has_attachments(&message) {
+                            let text = extract_text(message);
+                            if text.is_none() && !has_attachments(message) {
                                 continue;
                             }
 
-                            let content = build_content(&bot, &message, &text).await;
+                            let content = build_content(&bot, message, &text).await;
                             let conversation_id = format!("telegram:{chat_id}");
                             let sender_id = message
                                 .from
@@ -196,7 +242,7 @@ impl Messaging for TelegramAdapter {
                                 .unwrap_or_default();
 
                             let (metadata, formatted_author) = build_metadata(
-                                &message,
+                                message,
                                 &*bot_username.read().await,
                             );
 
@@ -248,7 +294,25 @@ impl Messaging for TelegramAdapter {
                         .context("failed to send telegram message")?;
                 }
             }
-            OutboundResponse::ThreadReply { thread_name: _, text } => {
+            OutboundResponse::RichMessage { text, poll, .. } => {
+                self.stop_typing(&message.conversation_id).await;
+
+                for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
+                    self.bot
+                        .send_message(chat_id, &chunk)
+                        .send()
+                        .await
+                        .context("failed to send telegram message")?;
+                }
+
+                if let Some(poll_data) = poll {
+                    send_poll(&self.bot, chat_id, &poll_data).await?;
+                }
+            }
+            OutboundResponse::ThreadReply {
+                thread_name: _,
+                text,
+            } => {
                 self.stop_typing(&message.conversation_id).await;
 
                 // Telegram doesn't have named threads. Reply to the source message instead.
@@ -364,19 +428,17 @@ impl Messaging for TelegramAdapter {
             OutboundResponse::Ephemeral { text, .. } => {
                 // Telegram has no ephemeral messages — send as regular text
                 let chat_id = self.extract_chat_id(message)?;
-                self.bot.send_message(chat_id, text).await
+                self.bot
+                    .send_message(chat_id, text)
+                    .await
                     .context("failed to send ephemeral fallback on telegram")?;
-            }
-            OutboundResponse::RichMessage { text, .. } => {
-                // No Block Kit on Telegram — plain text fallback
-                let chat_id = self.extract_chat_id(message)?;
-                self.bot.send_message(chat_id, text).await
-                    .context("failed to send rich message fallback on telegram")?;
             }
             OutboundResponse::ScheduledMessage { text, .. } => {
                 // Telegram has no scheduled messages — send immediately
                 let chat_id = self.extract_chat_id(message)?;
-                self.bot.send_message(chat_id, text).await
+                self.bot
+                    .send_message(chat_id, text)
+                    .await
                     .context("failed to send scheduled message fallback on telegram")?;
             }
         }
@@ -399,8 +461,10 @@ impl Messaging for TelegramAdapter {
                 // Send one immediately, then repeat every 4 seconds.
                 let handle = tokio::spawn(async move {
                     loop {
-                        if let Err(error) =
-                            bot.send_chat_action(chat_id, ChatAction::Typing).send().await
+                        if let Err(error) = bot
+                            .send_chat_action(chat_id, ChatAction::Typing)
+                            .send()
+                            .await
                         {
                             tracing::debug!(%error, "failed to send typing indicator");
                             break;
@@ -422,11 +486,7 @@ impl Messaging for TelegramAdapter {
         Ok(())
     }
 
-    async fn broadcast(
-        &self,
-        target: &str,
-        response: OutboundResponse,
-    ) -> crate::Result<()> {
+    async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
         let chat_id = ChatId(
             target
                 .parse::<i64>()
@@ -440,6 +500,18 @@ impl Messaging for TelegramAdapter {
                     .send()
                     .await
                     .context("failed to broadcast telegram message")?;
+            }
+        } else if let OutboundResponse::RichMessage { text, poll, .. } = response {
+            for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
+                self.bot
+                    .send_message(chat_id, &chunk)
+                    .send()
+                    .await
+                    .context("failed to broadcast telegram message")?;
+            }
+
+            if let Some(poll_data) = poll {
+                send_poll(&self.bot, chat_id, &poll_data).await?;
             }
         }
 
@@ -736,10 +808,7 @@ fn build_metadata(
             metadata.insert("reply_to_text".into(), truncated.into());
         }
         if let Some(from) = &reply.from {
-            metadata.insert(
-                "reply_to_author".into(),
-                build_display_name(from).into(),
-            );
+            metadata.insert("reply_to_author".into(), build_display_name(from).into());
         }
     }
 
@@ -753,6 +822,61 @@ fn build_display_name(user: &teloxide::types::User) -> String {
         Some(last) => format!("{first} {last}"),
         None => first.clone(),
     }
+}
+
+/// Send a native Telegram poll.
+///
+/// Telegram limits: max 12 answer options, question max 300 chars, each option
+/// max 100 chars. `open_period` only supports 5–600 seconds so we only set it
+/// when `duration_hours` converts to ≤600s; otherwise the poll stays open
+/// indefinitely (until manually stopped via the Telegram client).
+async fn send_poll(bot: &Bot, chat_id: ChatId, poll: &crate::Poll) -> anyhow::Result<()> {
+    let question = if poll.question.len() > 300 {
+        format!("{}…", &poll.question[..poll.question.floor_char_boundary(299)])
+    } else {
+        poll.question.clone()
+    };
+
+    let options: Vec<InputPollOption> = poll
+        .answers
+        .iter()
+        .take(12)
+        .map(|answer| {
+            let text = if answer.len() > 100 {
+                format!("{}…", &answer[..answer.floor_char_boundary(99)])
+            } else {
+                answer.clone()
+            };
+            InputPollOption::new(text)
+        })
+        .collect();
+
+    if options.len() < 2 {
+        anyhow::bail!("telegram polls require at least 2 answer options");
+    }
+
+    let mut request = bot
+        .send_poll(chat_id, question, options)
+        .is_anonymous(false);
+
+    // Telegram's open_period only supports 5–600 seconds. Apply it when the
+    // requested duration fits; otherwise leave unset so the poll stays open
+    // indefinitely.
+    let duration_secs = poll.duration_hours.saturating_mul(3600);
+    if (5..=600).contains(&duration_secs) {
+        request = request.open_period(duration_secs as u16);
+    }
+
+    if poll.allow_multiselect {
+        request = request.allows_multiple_answers(true);
+    }
+
+    request
+        .send()
+        .await
+        .context("failed to send telegram poll")?;
+
+    Ok(())
 }
 
 /// Split a message into chunks that fit within Telegram's character limit.

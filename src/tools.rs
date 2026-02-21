@@ -24,53 +24,68 @@
 //! **Cortex ToolServer** (one per agent):
 //! - `memory_save` — registered at startup
 
-pub mod reply;
 pub mod branch_tool;
-pub mod spawn_worker;
-pub mod route;
-pub mod cancel;
-pub mod skip;
-pub mod react;
-pub mod memory_save;
-pub mod memory_recall;
-pub mod memory_delete;
-pub mod set_status;
-pub mod shell;
-pub mod file;
-pub mod exec;
 pub mod browser;
-pub mod web_search;
+pub mod cancel;
 pub mod channel_recall;
 pub mod cron;
+pub mod exec;
+pub mod file;
+pub mod mcp;
+pub mod memory_delete;
+pub mod memory_recall;
+pub mod memory_save;
+pub mod react;
+pub mod reply;
+pub mod route;
 pub mod send_file;
 pub mod send_message_to_another_channel;
+pub mod set_status;
+pub mod shell;
+pub mod skip;
+pub mod spawn_worker;
 pub mod task_create;
 pub mod task_list;
 pub mod task_update;
+pub mod web_search;
 
-pub use reply::{ReplyTool, ReplyArgs, ReplyOutput, ReplyError};
-pub use branch_tool::{BranchTool, BranchArgs, BranchOutput, BranchError};
-pub use spawn_worker::{SpawnWorkerTool, SpawnWorkerArgs, SpawnWorkerOutput, SpawnWorkerError};
-pub use route::{RouteTool, RouteArgs, RouteOutput, RouteError};
-pub use cancel::{CancelTool, CancelArgs, CancelOutput, CancelError};
-pub use skip::{SkipTool, SkipArgs, SkipOutput, SkipError, SkipFlag, new_skip_flag};
-pub use react::{ReactTool, ReactArgs, ReactOutput, ReactError};
-pub use memory_save::{MemorySaveTool, MemorySaveArgs, MemorySaveOutput, MemorySaveError, AssociationInput};
-pub use memory_recall::{MemoryRecallTool, MemoryRecallArgs, MemoryRecallOutput, MemoryRecallError, MemoryOutput};
-pub use memory_delete::{MemoryDeleteTool, MemoryDeleteArgs, MemoryDeleteOutput, MemoryDeleteError};
-pub use set_status::{SetStatusTool, SetStatusArgs, SetStatusOutput, SetStatusError};
-pub use shell::{ShellTool, ShellArgs, ShellOutput, ShellError, ShellResult};
-pub use file::{FileTool, FileArgs, FileOutput, FileError, FileEntryOutput, FileEntry, FileType};
-pub use exec::{ExecTool, ExecArgs, ExecOutput, ExecError, ExecResult, EnvVar};
-pub use browser::{BrowserTool, BrowserArgs, BrowserOutput, BrowserError, BrowserAction, ActKind, ElementSummary, TabInfo};
-pub use web_search::{WebSearchTool, WebSearchArgs, WebSearchOutput, WebSearchError, SearchResult};
-pub use channel_recall::{ChannelRecallTool, ChannelRecallArgs, ChannelRecallOutput, ChannelRecallError};
-pub use cron::{CronTool, CronArgs, CronOutput, CronError};
-pub use send_file::{SendFileTool, SendFileArgs, SendFileOutput, SendFileError};
-pub use send_message_to_another_channel::{SendMessageTool, SendMessageArgs, SendMessageOutput, SendMessageError};
-pub use task_create::{TaskCreateTool, TaskCreateArgs, TaskCreateOutput, TaskCreateError};
-pub use task_list::{TaskListTool, TaskListArgs, TaskListOutput, TaskListError};
-pub use task_update::{TaskUpdateTool, TaskUpdateArgs, TaskUpdateOutput, TaskUpdateError};
+pub use branch_tool::{BranchArgs, BranchError, BranchOutput, BranchTool};
+pub use browser::{
+    ActKind, BrowserAction, BrowserArgs, BrowserError, BrowserOutput, BrowserTool, ElementSummary,
+    TabInfo,
+};
+pub use cancel::{CancelArgs, CancelError, CancelOutput, CancelTool};
+pub use channel_recall::{
+    ChannelRecallArgs, ChannelRecallError, ChannelRecallOutput, ChannelRecallTool,
+};
+pub use cron::{CronArgs, CronError, CronOutput, CronTool};
+pub use exec::{EnvVar, ExecArgs, ExecError, ExecOutput, ExecResult, ExecTool};
+pub use file::{FileArgs, FileEntry, FileEntryOutput, FileError, FileOutput, FileTool, FileType};
+pub use mcp::{McpToolAdapter, McpToolError, McpToolOutput};
+pub use memory_delete::{
+    MemoryDeleteArgs, MemoryDeleteError, MemoryDeleteOutput, MemoryDeleteTool,
+};
+pub use memory_recall::{
+    MemoryOutput, MemoryRecallArgs, MemoryRecallError, MemoryRecallOutput, MemoryRecallTool,
+};
+pub use memory_save::{
+    AssociationInput, MemorySaveArgs, MemorySaveError, MemorySaveOutput, MemorySaveTool,
+};
+pub use react::{ReactArgs, ReactError, ReactOutput, ReactTool};
+pub use reply::{RepliedFlag, ReplyArgs, ReplyError, ReplyOutput, ReplyTool, new_replied_flag};
+pub use route::{RouteArgs, RouteError, RouteOutput, RouteTool};
+pub use send_file::{SendFileArgs, SendFileError, SendFileOutput, SendFileTool};
+pub use send_message_to_another_channel::{
+    SendMessageArgs, SendMessageError, SendMessageOutput, SendMessageTool,
+};
+pub use set_status::{SetStatusArgs, SetStatusError, SetStatusOutput, SetStatusTool};
+pub use shell::{ShellArgs, ShellError, ShellOutput, ShellResult, ShellTool};
+pub use skip::{SkipArgs, SkipError, SkipFlag, SkipOutput, SkipTool, new_skip_flag};
+pub use spawn_worker::{SpawnWorkerArgs, SpawnWorkerError, SpawnWorkerOutput, SpawnWorkerTool};
+pub use task_create::{TaskCreateArgs, TaskCreateError, TaskCreateOutput, TaskCreateTool};
+pub use task_list::{TaskListArgs, TaskListError, TaskListOutput, TaskListTool};
+pub use task_update::{TaskUpdateArgs, TaskUpdateError, TaskUpdateOutput, TaskUpdateTool};
+pub use web_search::{SearchResult, WebSearchArgs, WebSearchError, WebSearchOutput, WebSearchTool};
 
 use crate::agent::channel::ChannelState;
 use crate::config::BrowserConfig;
@@ -126,27 +141,36 @@ pub async fn add_channel_tools(
     response_tx: mpsc::Sender<OutboundResponse>,
     conversation_id: impl Into<String>,
     skip_flag: SkipFlag,
+    replied_flag: RepliedFlag,
     cron_tool: Option<CronTool>,
 ) -> Result<(), rig::tool::server::ToolServerError> {
-    handle.add_tool(ReplyTool::new(
-        response_tx.clone(),
-        conversation_id,
-        state.conversation_logger.clone(),
-        state.channel_id.clone(),
-        skip_flag.clone(),
-    )).await?;
+    handle
+        .add_tool(ReplyTool::new(
+            response_tx.clone(),
+            conversation_id,
+            state.conversation_logger.clone(),
+            state.channel_id.clone(),
+            replied_flag.clone(),
+        ))
+        .await?;
     handle.add_tool(BranchTool::new(state.clone())).await?;
     handle.add_tool(SpawnWorkerTool::new(state.clone())).await?;
     handle.add_tool(RouteTool::new(state.clone())).await?;
     if let Some(messaging_manager) = &state.deps.messaging_manager {
-        handle.add_tool(SendMessageTool::new(
-            messaging_manager.clone(),
-            state.channel_store.clone(),
-        )).await?;
+        handle
+            .add_tool(SendMessageTool::new(
+                messaging_manager.clone(),
+                state.channel_store.clone(),
+            ))
+            .await?;
     }
     handle.add_tool(CancelTool::new(state)).await?;
-    handle.add_tool(SkipTool::new(skip_flag, response_tx.clone())).await?;
-    handle.add_tool(SendFileTool::new(response_tx.clone())).await?;
+    handle
+        .add_tool(SkipTool::new(skip_flag, response_tx.clone()))
+        .await?;
+    handle
+        .add_tool(SendFileTool::new(response_tx.clone()))
+        .await?;
     handle.add_tool(ReactTool::new(response_tx)).await?;
     if let Some(cron) = cron_tool {
         handle.add_tool(cron).await?;
@@ -212,6 +236,7 @@ pub fn create_branch_tool_server(
 ///
 /// File operations are restricted to `workspace`. Shell and exec commands are
 /// blocked from accessing sensitive files in `instance_dir`.
+#[allow(clippy::too_many_arguments)]
 pub fn create_worker_tool_server(
     agent_id: AgentId,
     worker_id: WorkerId,
@@ -223,13 +248,16 @@ pub fn create_worker_tool_server(
     brave_search_key: Option<String>,
     workspace: PathBuf,
     instance_dir: PathBuf,
+    mcp_tools: Vec<McpToolAdapter>,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(ShellTool::new(instance_dir.clone(), workspace.clone()))
         .tool(FileTool::new(workspace.clone()))
         .tool(ExecTool::new(instance_dir, workspace))
         .tool(TaskUpdateTool::for_worker(task_store, agent_id.clone(), worker_id))
-        .tool(SetStatusTool::new(agent_id, worker_id, channel_id, event_tx));
+        .tool(SetStatusTool::new(
+            agent_id, worker_id, channel_id, event_tx,
+        ));
 
     if browser_config.enabled {
         server = server.tool(BrowserTool::new(browser_config, screenshot_dir));
@@ -237,6 +265,10 @@ pub fn create_worker_tool_server(
 
     if let Some(key) = brave_search_key {
         server = server.tool(WebSearchTool::new(key));
+    }
+
+    for mcp_tool in mcp_tools {
+        server = server.tool(mcp_tool);
     }
 
     server.run()
@@ -257,6 +289,7 @@ pub fn create_cortex_tool_server(memory_search: Arc<MemorySearch>) -> ToolServer
 /// Combines branch tools (memory) with worker tools (shell, file, exec) to give
 /// the interactive cortex full capabilities. Does not include channel-specific
 /// tools (reply, react, skip) since the cortex chat doesn't talk to platforms.
+#[allow(clippy::too_many_arguments)]
 pub fn create_cortex_chat_tool_server(
     agent_id: AgentId,
     task_store: Arc<TaskStore>,

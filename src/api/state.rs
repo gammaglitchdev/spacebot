@@ -6,6 +6,7 @@ use crate::agent::status::StatusBlock;
 use crate::config::{Binding, DefaultsConfig, DiscordPermissions, RuntimeConfig, SlackPermissions};
 use crate::cron::{CronStore, Scheduler};
 use crate::llm::LlmManager;
+use crate::mcp::McpManager;
 use crate::memory::{EmbeddingModel, MemorySearch};
 use crate::messaging::MessagingManager;
 use crate::messaging::webchat::WebChatAdapter;
@@ -21,7 +22,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{RwLock, broadcast, mpsc};
 
 /// Summary of an agent's configuration, exposed via the API.
 #[derive(Debug, Clone, Serialize)]
@@ -64,6 +65,8 @@ pub struct ApiState {
     pub task_stores: arc_swap::ArcSwap<HashMap<String, Arc<TaskStore>>>,
     /// Per-agent RuntimeConfig for reading live hot-reloaded configuration.
     pub runtime_configs: ArcSwap<HashMap<String, Arc<RuntimeConfig>>>,
+    /// Per-agent MCP managers for status and reconnect APIs.
+    pub mcp_managers: ArcSwap<HashMap<String, Arc<McpManager>>>,
     /// Shared reference to the Discord permissions ArcSwap (same instance used by the adapter and file watcher).
     pub discord_permissions: RwLock<Option<Arc<ArcSwap<DiscordPermissions>>>>,
     /// Shared reference to the Slack permissions ArcSwap (same instance used by the adapter and file watcher).
@@ -102,6 +105,7 @@ pub enum ApiEvent {
     InboundMessage {
         agent_id: String,
         channel_id: String,
+        sender_name: Option<String>,
         sender_id: String,
         text: String,
     },
@@ -194,6 +198,7 @@ impl ApiState {
             cron_schedulers: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             task_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             runtime_configs: ArcSwap::from_pointee(HashMap::new()),
+            mcp_managers: ArcSwap::from_pointee(HashMap::new()),
             discord_permissions: RwLock::new(None),
             slack_permissions: RwLock::new(None),
             bindings: RwLock::new(None),
@@ -225,10 +230,7 @@ impl ApiState {
 
     /// Remove a channel's status block when it's dropped.
     pub async fn unregister_channel_status(&self, channel_id: &str) {
-        self.channel_status_blocks
-            .write()
-            .await
-            .remove(channel_id);
+        self.channel_status_blocks.write().await.remove(channel_id);
     }
 
     /// Register a channel's state for API-driven cancellation.
@@ -255,65 +257,114 @@ impl ApiState {
                     Ok(event) => {
                         // Translate ProcessEvents into typed ApiEvents
                         match &event {
-                            ProcessEvent::WorkerStarted { worker_id, channel_id, task, .. } => {
-                                api_tx.send(ApiEvent::WorkerStarted {
-                                    agent_id: agent_id.clone(),
-                                    channel_id: channel_id.as_deref().map(|s| s.to_string()),
-                                    worker_id: worker_id.to_string(),
-                                    task: task.clone(),
-                                }).ok();
+                            ProcessEvent::WorkerStarted {
+                                worker_id,
+                                channel_id,
+                                task,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::WorkerStarted {
+                                        agent_id: agent_id.clone(),
+                                        channel_id: channel_id.as_deref().map(|s| s.to_string()),
+                                        worker_id: worker_id.to_string(),
+                                        task: task.clone(),
+                                    })
+                                    .ok();
                             }
-                            ProcessEvent::BranchStarted { branch_id, channel_id, description, .. } => {
-                                api_tx.send(ApiEvent::BranchStarted {
-                                    agent_id: agent_id.clone(),
-                                    channel_id: channel_id.to_string(),
-                                    branch_id: branch_id.to_string(),
-                                    description: description.clone(),
-                                }).ok();
+                            ProcessEvent::BranchStarted {
+                                branch_id,
+                                channel_id,
+                                description,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::BranchStarted {
+                                        agent_id: agent_id.clone(),
+                                        channel_id: channel_id.to_string(),
+                                        branch_id: branch_id.to_string(),
+                                        description: description.clone(),
+                                    })
+                                    .ok();
                             }
-                            ProcessEvent::WorkerStatus { worker_id, channel_id, status, .. } => {
-                                api_tx.send(ApiEvent::WorkerStatusUpdate {
-                                    agent_id: agent_id.clone(),
-                                    channel_id: channel_id.as_deref().map(|s| s.to_string()),
-                                    worker_id: worker_id.to_string(),
-                                    status: status.clone(),
-                                }).ok();
+                            ProcessEvent::WorkerStatus {
+                                worker_id,
+                                channel_id,
+                                status,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::WorkerStatusUpdate {
+                                        agent_id: agent_id.clone(),
+                                        channel_id: channel_id.as_deref().map(|s| s.to_string()),
+                                        worker_id: worker_id.to_string(),
+                                        status: status.clone(),
+                                    })
+                                    .ok();
                             }
-                            ProcessEvent::WorkerComplete { worker_id, channel_id, result, .. } => {
-                                api_tx.send(ApiEvent::WorkerCompleted {
-                                    agent_id: agent_id.clone(),
-                                    channel_id: channel_id.as_deref().map(|s| s.to_string()),
-                                    worker_id: worker_id.to_string(),
-                                    result: result.clone(),
-                                }).ok();
+                            ProcessEvent::WorkerComplete {
+                                worker_id,
+                                channel_id,
+                                result,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::WorkerCompleted {
+                                        agent_id: agent_id.clone(),
+                                        channel_id: channel_id.as_deref().map(|s| s.to_string()),
+                                        worker_id: worker_id.to_string(),
+                                        result: result.clone(),
+                                    })
+                                    .ok();
                             }
-                            ProcessEvent::BranchResult { branch_id, channel_id, conclusion, .. } => {
-                                api_tx.send(ApiEvent::BranchCompleted {
-                                    agent_id: agent_id.clone(),
-                                    channel_id: channel_id.to_string(),
-                                    branch_id: branch_id.to_string(),
-                                    conclusion: conclusion.clone(),
-                                }).ok();
+                            ProcessEvent::BranchResult {
+                                branch_id,
+                                channel_id,
+                                conclusion,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::BranchCompleted {
+                                        agent_id: agent_id.clone(),
+                                        channel_id: channel_id.to_string(),
+                                        branch_id: branch_id.to_string(),
+                                        conclusion: conclusion.clone(),
+                                    })
+                                    .ok();
                             }
-                            ProcessEvent::ToolStarted { process_id, channel_id, tool_name, .. } => {
+                            ProcessEvent::ToolStarted {
+                                process_id,
+                                channel_id,
+                                tool_name,
+                                ..
+                            } => {
                                 let (process_type, id_str) = process_id_info(process_id);
-                                api_tx.send(ApiEvent::ToolStarted {
-                                    agent_id: agent_id.clone(),
-                                    channel_id: channel_id.as_deref().map(|s| s.to_string()),
-                                    process_type,
-                                    process_id: id_str,
-                                    tool_name: tool_name.clone(),
-                                }).ok();
+                                api_tx
+                                    .send(ApiEvent::ToolStarted {
+                                        agent_id: agent_id.clone(),
+                                        channel_id: channel_id.as_deref().map(|s| s.to_string()),
+                                        process_type,
+                                        process_id: id_str,
+                                        tool_name: tool_name.clone(),
+                                    })
+                                    .ok();
                             }
-                            ProcessEvent::ToolCompleted { process_id, channel_id, tool_name, .. } => {
+                            ProcessEvent::ToolCompleted {
+                                process_id,
+                                channel_id,
+                                tool_name,
+                                ..
+                            } => {
                                 let (process_type, id_str) = process_id_info(process_id);
-                                api_tx.send(ApiEvent::ToolCompleted {
-                                    agent_id: agent_id.clone(),
-                                    channel_id: channel_id.as_deref().map(|s| s.to_string()),
-                                    process_type,
-                                    process_id: id_str,
-                                    tool_name: tool_name.clone(),
-                                }).ok();
+                                api_tx
+                                    .send(ApiEvent::ToolCompleted {
+                                        agent_id: agent_id.clone(),
+                                        channel_id: channel_id.as_deref().map(|s| s.to_string()),
+                                        process_type,
+                                        process_id: id_str,
+                                        tool_name: tool_name.clone(),
+                                    })
+                                    .ok();
                             }
                             _ => {}
                         }
@@ -376,6 +427,11 @@ impl ApiState {
     /// Set the runtime configs for all agents.
     pub fn set_runtime_configs(&self, configs: HashMap<String, Arc<RuntimeConfig>>) {
         self.runtime_configs.store(Arc::new(configs));
+    }
+
+    /// Set the MCP managers for all agents.
+    pub fn set_mcp_managers(&self, managers: HashMap<String, Arc<McpManager>>) {
+        self.mcp_managers.store(Arc::new(managers));
     }
 
     /// Share the Discord permissions ArcSwap with the API so reads get hot-reloaded values.

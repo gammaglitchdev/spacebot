@@ -1,6 +1,6 @@
 use crate::error::Result;
 use anyhow::Context;
-use minijinja::{context, Environment, Value};
+use minijinja::{Environment, Value, context};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -371,6 +371,7 @@ impl PromptEngine {
     }
 
     /// Render the complete channel system prompt with all dynamic components.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_channel_prompt(
         &self,
         identity_context: Option<String>,

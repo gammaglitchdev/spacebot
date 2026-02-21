@@ -68,8 +68,7 @@ impl Messaging for TwitchAdapter {
             .unwrap_or(&self.oauth_token)
             .to_string();
 
-        let credentials =
-            StaticLoginCredentials::new(self.username.clone(), Some(token));
+        let credentials = StaticLoginCredentials::new(self.username.clone(), Some(token));
         let config = ClientConfig::new_simple(credentials);
 
         let (mut incoming, client) =
@@ -120,11 +119,10 @@ impl Messaging for TwitchAdapter {
                         let permissions = permissions.load();
 
                         // Channel filter
-                        if let Some(filter) = &permissions.channel_filter {
-                            if !filter.iter().any(|c| c.eq_ignore_ascii_case(&privmsg.channel_login)) {
+                        if let Some(filter) = &permissions.channel_filter
+                            && !filter.iter().any(|c| c.eq_ignore_ascii_case(&privmsg.channel_login)) {
                                 continue;
                             }
-                        }
 
                         // User filter
                         if !permissions.allowed_users.is_empty()
@@ -229,6 +227,14 @@ impl Messaging for TwitchAdapter {
                         .context("failed to send twitch message")?;
                 }
             }
+            OutboundResponse::RichMessage { text, .. } => {
+                for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
+                    client
+                        .say(channel.to_owned(), chunk)
+                        .await
+                        .context("failed to send twitch message")?;
+                }
+            }
             OutboundResponse::ThreadReply { text, .. } => {
                 // Twitch has no threads — reply to the source message instead
                 let reply_to_id = message
@@ -251,7 +257,9 @@ impl Messaging for TwitchAdapter {
                     }
                 }
             }
-            OutboundResponse::File { filename, caption, .. } => {
+            OutboundResponse::File {
+                filename, caption, ..
+            } => {
                 // Twitch is text-only — send a note about the file
                 let text = match caption {
                     Some(caption) => format!("[File: {filename}] {caption}"),
@@ -281,13 +289,6 @@ impl Messaging for TwitchAdapter {
                     .await
                     .context("failed to send ephemeral fallback on twitch")?;
             }
-            OutboundResponse::RichMessage { text, .. } => {
-                // No Block Kit on Twitch — plain text fallback
-                client
-                    .say(channel.to_owned(), text)
-                    .await
-                    .context("failed to send rich message fallback on twitch")?;
-            }
             OutboundResponse::ScheduledMessage { text, .. } => {
                 // No scheduled messages on Twitch — send immediately
                 client
@@ -300,17 +301,21 @@ impl Messaging for TwitchAdapter {
         Ok(())
     }
 
-    async fn broadcast(
-        &self,
-        target: &str,
-        response: OutboundResponse,
-    ) -> crate::Result<()> {
+    async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
         let client_guard = self.client.read().await;
         let client = client_guard
             .as_ref()
             .context("twitch client not connected")?;
 
         if let OutboundResponse::Text(text) = response {
+            let channel = target.strip_prefix('#').unwrap_or(target);
+            for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
+                client
+                    .say(channel.to_owned(), chunk)
+                    .await
+                    .context("failed to broadcast twitch message")?;
+            }
+        } else if let OutboundResponse::RichMessage { text, .. } = response {
             let channel = target.strip_prefix('#').unwrap_or(target);
             for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
                 client

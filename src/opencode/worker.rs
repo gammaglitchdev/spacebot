@@ -12,7 +12,7 @@ use anyhow::{Context as _, bail};
 use futures::StreamExt as _;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use uuid::Uuid;
 
 /// An OpenCode-backed worker that drives a coding session via subprocess.
@@ -28,7 +28,7 @@ pub struct OpenCodeWorker {
     pub input_rx: Option<mpsc::Receiver<String>>,
     /// System prompt injected into each OpenCode prompt.
     pub system_prompt: Option<String>,
-    /// Model override (provider/model format like "anthropic/claude-sonnet-4-20250514").
+    /// Model override (provider/model format like "anthropic/claude-sonnet-4").
     pub model: Option<String>,
 }
 
@@ -95,20 +95,25 @@ impl OpenCodeWorker {
         self.send_status("starting OpenCode server");
 
         // Get or create server for this directory
-        let server = self.server_pool
+        let server = self
+            .server_pool
             .get_or_create(&self.directory)
             .await
-            .with_context(|| format!(
-                "failed to get OpenCode server for '{}'",
-                self.directory.display()
-            ))?;
+            .with_context(|| {
+                format!(
+                    "failed to get OpenCode server for '{}'",
+                    self.directory.display()
+                )
+            })?;
 
         self.send_status("creating session");
 
         // Create a session
         let session = {
             let guard = server.lock().await;
-            guard.create_session(Some(format!("spacebot-worker-{}", self.id))).await?
+            guard
+                .create_session(Some(format!("spacebot-worker-{}", self.id)))
+                .await?
         };
         let session_id = session.id.clone();
 
@@ -141,15 +146,15 @@ impl OpenCodeWorker {
         self.send_status("sending task to OpenCode");
         {
             let guard = server.lock().await;
-            guard.send_prompt_async(&session_id, &prompt_request).await?;
+            guard
+                .send_prompt_async(&session_id, &prompt_request)
+                .await?;
         }
 
         // Process SSE events until session goes idle or errors
-        let result_text = self.process_events(
-            event_response,
-            &session_id,
-            &server,
-        ).await?;
+        let result_text = self
+            .process_events(event_response, &session_id, &server)
+            .await?;
 
         // Interactive follow-up loop
         if let Some(mut input_rx) = self.input_rx.take() {
@@ -176,10 +181,15 @@ impl OpenCodeWorker {
 
                 {
                     let guard = server.lock().await;
-                    guard.send_prompt_async(&session_id, &follow_up_request).await?;
+                    guard
+                        .send_prompt_async(&session_id, &follow_up_request)
+                        .await?;
                 }
 
-                match self.process_events(event_response, &session_id, &server).await {
+                match self
+                    .process_events(event_response, &session_id, &server)
+                    .await
+                {
                     Ok(_) => {
                         self.send_status("waiting for follow-up");
                     }
@@ -247,15 +257,18 @@ impl OpenCodeWorker {
 
             // Parse SSE lines from buffer
             while let Some(event) = extract_sse_event(&mut buffer) {
-                match self.handle_sse_event(
-                    &event,
-                    session_id,
-                    server,
-                    &mut last_text,
-                    &mut current_tool,
-                    &mut has_received_event,
-                    &mut has_assistant_message,
-                ).await {
+                match self
+                    .handle_sse_event(
+                        &event,
+                        session_id,
+                        server,
+                        &mut last_text,
+                        &mut current_tool,
+                        &mut has_received_event,
+                        &mut has_assistant_message,
+                    )
+                    .await
+                {
                     EventAction::Continue => {}
                     EventAction::Complete => return Ok(last_text.clone()),
                     EventAction::Error(message) => bail!("OpenCode session error: {message}"),
@@ -265,6 +278,7 @@ impl OpenCodeWorker {
     }
 
     /// Handle a single SSE event. Returns whether to continue, complete, or error.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_sse_event(
         &self,
         event: &SseEvent,
@@ -279,14 +293,12 @@ impl OpenCodeWorker {
             SseEvent::MessageUpdated { info } => {
                 *has_received_event = true;
                 // Track assistant messages for idle guard
-                if let Some(msg) = info {
-                    if msg.role == "assistant" {
-                        if let Some(sid) = &msg.session_id {
-                            if sid == session_id {
-                                *has_assistant_message = true;
-                            }
-                        }
-                    }
+                if let Some(msg) = info
+                    && msg.role == "assistant"
+                    && let Some(sid) = &msg.session_id
+                    && sid == session_id
+                {
+                    *has_assistant_message = true;
                 }
                 EventAction::Continue
             }
@@ -294,43 +306,54 @@ impl OpenCodeWorker {
             SseEvent::MessagePartUpdated { part, .. } => {
                 *has_received_event = true;
                 match part {
-                    Part::Text { text, session_id: part_session, .. } => {
-                        if let Some(sid) = part_session {
-                            if sid != session_id {
-                                return EventAction::Continue;
-                            }
+                    Part::Text {
+                        text,
+                        session_id: part_session,
+                        ..
+                    } => {
+                        if let Some(sid) = part_session
+                            && sid != session_id
+                        {
+                            return EventAction::Continue;
                         }
                         *has_assistant_message = true;
                         *last_text = text.clone();
                     }
-                    Part::Tool { tool, state, session_id: part_session, .. } => {
-                        if let Some(sid) = part_session {
-                            if sid != session_id {
-                                return EventAction::Continue;
-                            }
+                    Part::Tool {
+                        tool,
+                        state,
+                        session_id: part_session,
+                        ..
+                    } => {
+                        if let Some(sid) = part_session
+                            && sid != session_id
+                        {
+                            return EventAction::Continue;
                         }
                         *has_assistant_message = true;
-                        if let Some(tool_name) = tool {
-                            if let Some(tool_state) = state {
-                                match tool_state {
-                                    ToolState::Running { title, .. } => {
-                                        *current_tool = Some(tool_name.clone());
-                                        let label = title.as_deref().unwrap_or(tool_name.as_str());
-                                        self.send_status(&format!("running: {label}"));
+                        if let Some(tool_name) = tool
+                            && let Some(tool_state) = state
+                        {
+                            match tool_state {
+                                ToolState::Running { title, .. } => {
+                                    *current_tool = Some(tool_name.clone());
+                                    let label = title.as_deref().unwrap_or(tool_name.as_str());
+                                    self.send_status(&format!("running: {label}"));
+                                }
+                                ToolState::Completed { .. } => {
+                                    if current_tool.as_deref() == Some(tool_name.as_str()) {
+                                        *current_tool = None;
                                     }
-                                    ToolState::Completed { .. } => {
-                                        if current_tool.as_deref() == Some(tool_name.as_str()) {
-                                            *current_tool = None;
-                                        }
-                                        self.send_status("working");
-                                    }
-                                    ToolState::Error { error, .. } => {
-                                        let description = error.as_deref().unwrap_or("unknown");
-                                        self.send_status(&format!("tool error: {tool_name}: {description}"));
-                                    }
-                                    ToolState::Pending { .. } => {
-                                        // Tool queued, no status update needed
-                                    }
+                                    self.send_status("working");
+                                }
+                                ToolState::Error { error, .. } => {
+                                    let description = error.as_deref().unwrap_or("unknown");
+                                    self.send_status(&format!(
+                                        "tool error: {tool_name}: {description}"
+                                    ));
+                                }
+                                ToolState::Pending { .. } => {
+                                    // Tool queued, no status update needed
                                 }
                             }
                         }
@@ -340,7 +363,9 @@ impl OpenCodeWorker {
                 EventAction::Continue
             }
 
-            SseEvent::SessionIdle { session_id: event_session_id } => {
+            SseEvent::SessionIdle {
+                session_id: event_session_id,
+            } => {
                 if event_session_id != session_id {
                     return EventAction::Continue;
                 }
@@ -360,7 +385,10 @@ impl OpenCodeWorker {
                 EventAction::Complete
             }
 
-            SseEvent::SessionError { session_id: event_session_id, error } => {
+            SseEvent::SessionError {
+                session_id: event_session_id,
+                error,
+            } => {
                 if event_session_id.as_deref() != Some(session_id) {
                     return EventAction::Continue;
                 }
@@ -400,7 +428,10 @@ impl OpenCodeWorker {
 
                 // Auto-allow (OPENCODE_CONFIG_CONTENT should prevent most prompts)
                 let guard = server.lock().await;
-                if let Err(error) = guard.reply_permission(&permission.id, PermissionReply::Once).await {
+                if let Err(error) = guard
+                    .reply_permission(&permission.id, PermissionReply::Once)
+                    .await
+                {
                     tracing::warn!(
                         worker_id = %self.id,
                         permission_id = %permission.id,
@@ -429,29 +460,35 @@ impl OpenCodeWorker {
                     worker_id: self.id,
                     channel_id: self.channel_id.clone(),
                     question_id: question.id.clone(),
-                    questions: question.questions.iter().map(|q| {
-                        QuestionInfo {
+                    questions: question
+                        .questions
+                        .iter()
+                        .map(|q| QuestionInfo {
                             question: q.question.clone(),
                             header: q.header.clone(),
                             options: q.options.clone(),
-                        }
-                    }).collect(),
+                        })
+                        .collect(),
                 });
 
                 // Auto-select first option
-                let answers: Vec<QuestionAnswer> = question.questions.iter().map(|q| {
-                    if let Some(first_option) = q.options.first() {
-                        QuestionAnswer {
-                            label: first_option.label.clone(),
-                            description: first_option.description.clone(),
+                let answers: Vec<QuestionAnswer> = question
+                    .questions
+                    .iter()
+                    .map(|q| {
+                        if let Some(first_option) = q.options.first() {
+                            QuestionAnswer {
+                                label: first_option.label.clone(),
+                                description: first_option.description.clone(),
+                            }
+                        } else {
+                            QuestionAnswer {
+                                label: "continue".to_string(),
+                                description: None,
+                            }
                         }
-                    } else {
-                        QuestionAnswer {
-                            label: "continue".to_string(),
-                            description: None,
-                        }
-                    }
-                }).collect();
+                    })
+                    .collect();
 
                 let guard = server.lock().await;
                 if let Err(error) = guard.reply_question(&question.id, answers).await {
@@ -466,12 +503,17 @@ impl OpenCodeWorker {
                 EventAction::Continue
             }
 
-            SseEvent::SessionStatus { session_id: event_session_id, status } => {
+            SseEvent::SessionStatus {
+                session_id: event_session_id,
+                status,
+            } => {
                 if event_session_id != session_id {
                     return EventAction::Continue;
                 }
                 match status {
-                    SessionStatusPayload::Retry { attempt, message, .. } => {
+                    SessionStatusPayload::Retry {
+                        attempt, message, ..
+                    } => {
                         let description = message.as_deref().unwrap_or("rate limited");
                         self.send_status(&format!("retry attempt {attempt}: {description}"));
                     }
@@ -549,7 +591,7 @@ fn extract_sse_event(buffer: &mut String) -> Option<SseEvent> {
     }
 }
 
-/// Parse a model string like "anthropic/claude-sonnet-4-20250514" into a ModelParam.
+/// Parse a model string like "anthropic/claude-sonnet-4" into a ModelParam.
 fn parse_model_param(model: &str) -> Option<ModelParam> {
     let (provider, model_id) = model.split_once('/')?;
     Some(ModelParam {

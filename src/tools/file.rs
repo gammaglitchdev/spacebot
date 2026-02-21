@@ -35,7 +35,10 @@ impl FileTool {
         // existing ancestor and append the remaining components.
         let canonical = best_effort_canonicalize(&resolved);
 
-        let workspace_canonical = self.workspace.canonicalize().unwrap_or_else(|_| self.workspace.clone());
+        let workspace_canonical = self
+            .workspace
+            .canonicalize()
+            .unwrap_or_else(|_| self.workspace.clone());
 
         if !canonical.starts_with(&workspace_canonical) {
             return Err(FileError(format!(
@@ -211,12 +214,10 @@ async fn do_file_write(
     create_dirs: bool,
 ) -> Result<FileOutput, FileError> {
     // Ensure parent directory exists if requested
-    if create_dirs {
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| FileError(format!("Failed to create directory: {e}")))?;
-        }
+    if create_dirs && let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| FileError(format!("Failed to create directory: {e}")))?;
     }
 
     tokio::fs::write(path, content)
@@ -285,7 +286,10 @@ async fn do_file_list(path: &Path) -> Result<FileOutput, FileError> {
 
     if total_count > max_entries {
         entries.push(FileEntryOutput {
-            name: format!("... and {} more entries (listing capped at {max_entries})", total_count - max_entries),
+            name: format!(
+                "... and {} more entries (listing capped at {max_entries})",
+                total_count - max_entries
+            ),
             entry_type: "notice".to_string(),
             size: 0,
         });
@@ -300,8 +304,6 @@ async fn do_file_list(path: &Path) -> Result<FileOutput, FileError> {
         error: None,
     })
 }
-
-
 
 /// File entry metadata (legacy).
 #[derive(Debug, Clone)]
@@ -322,7 +324,6 @@ pub enum FileType {
 /// System-internal file operations that bypass workspace containment.
 /// These are used by the system itself (not LLM-facing) and operate on
 /// arbitrary paths.
-
 pub async fn file_read(path: impl AsRef<Path>) -> crate::error::Result<String> {
     do_file_read(path.as_ref())
         .await
@@ -366,5 +367,3 @@ pub async fn file_list(path: impl AsRef<Path>) -> crate::error::Result<Vec<FileE
         })
         .collect())
 }
-
-use anyhow::Context as _;

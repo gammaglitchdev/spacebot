@@ -46,6 +46,25 @@ enum Command {
     /// Manage skills
     #[command(subcommand)]
     Skill(SkillCommand),
+    /// Manage authentication
+    #[command(subcommand)]
+    Auth(AuthCommand),
+}
+
+#[derive(Subcommand)]
+enum AuthCommand {
+    /// Log in to Anthropic via OAuth (opens browser)
+    Login {
+        /// Use API console instead of Claude Pro/Max
+        #[arg(long)]
+        console: bool,
+    },
+    /// Show current auth status
+    Status,
+    /// Log out (remove stored credentials)
+    Logout,
+    /// Refresh the access token
+    Refresh,
 }
 
 #[derive(Subcommand)]
@@ -124,6 +143,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Status => cmd_status(),
         Command::Skill(skill_cmd) => cmd_skill(cli.config, skill_cmd),
+        Command::Auth(auth_cmd) => cmd_auth(cli.config, auth_cmd),
     }
 }
 
@@ -290,6 +310,84 @@ fn cmd_status() -> anyhow::Result<()> {
     });
 
     Ok(())
+}
+
+fn cmd_auth(config_path: Option<std::path::PathBuf>, auth_cmd: AuthCommand) -> anyhow::Result<()> {
+    // We need the instance_dir for credential storage. Try loading config,
+    // but fall back to the default instance dir if config doesn't exist yet
+    // (auth login may be the first thing a user runs).
+    let instance_dir = if let Ok(config) = load_config(&config_path) {
+        config.instance_dir
+    } else {
+        spacebot::config::Config::default_instance_dir()
+    };
+
+    // Ensure instance dir exists
+    std::fs::create_dir_all(&instance_dir)?;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime")?;
+
+    runtime.block_on(async {
+        match auth_cmd {
+            AuthCommand::Login { console } => {
+                let mode = if console {
+                    spacebot::auth::AuthMode::Console
+                } else {
+                    spacebot::auth::AuthMode::Max
+                };
+                spacebot::auth::login_interactive(&instance_dir, mode).await?;
+                Ok(())
+            }
+            AuthCommand::Status => {
+                match spacebot::auth::load_credentials(&instance_dir)? {
+                    Some(creds) => {
+                        let expires_in = creds.expires_at - chrono::Utc::now().timestamp_millis();
+                        let expires_min = expires_in / 60_000;
+                        if creds.is_expired() {
+                            eprintln!("Anthropic OAuth: expired ({}m ago)", -expires_min);
+                        } else {
+                            eprintln!("Anthropic OAuth: valid (expires in {}m)", expires_min);
+                        }
+                        eprintln!("  access token: {}...", &creds.access_token[..20]);
+                        eprintln!("  refresh token: {}...", &creds.refresh_token[..20]);
+                        eprintln!(
+                            "  credentials file: {}",
+                            spacebot::auth::credentials_path(&instance_dir).display()
+                        );
+                    }
+                    None => {
+                        eprintln!("No OAuth credentials found.");
+                        eprintln!("Run `spacebot auth login` to authenticate.");
+                    }
+                }
+                Ok(())
+            }
+            AuthCommand::Logout => {
+                let path = spacebot::auth::credentials_path(&instance_dir);
+                if path.exists() {
+                    std::fs::remove_file(&path)?;
+                    eprintln!("Credentials removed.");
+                } else {
+                    eprintln!("No credentials found.");
+                }
+                Ok(())
+            }
+            AuthCommand::Refresh => {
+                let creds = spacebot::auth::load_credentials(&instance_dir)?
+                    .context("no credentials found — run `spacebot auth login` first")?;
+                eprintln!("Refreshing access token...");
+                let new_creds = creds.refresh().await.context("refresh failed")?;
+                spacebot::auth::save_credentials(&instance_dir, &new_creds)?;
+                let expires_min =
+                    (new_creds.expires_at - chrono::Utc::now().timestamp_millis()) / 60_000;
+                eprintln!("Token refreshed (expires in {}m)", expires_min);
+                Ok(())
+            }
+        }
+    })
 }
 
 fn cmd_skill(
@@ -541,8 +639,9 @@ async fn run(
         None
     };
 
-    // Check if we have provider configuration
-    let has_providers = config.llm.has_any_key();
+    // Check if we have provider configuration (API keys or OAuth credentials)
+    let has_providers =
+        config.llm.has_any_key() || spacebot::auth::credentials_path(&config.instance_dir).exists();
 
     if !has_providers {
         tracing::info!("No LLM providers configured. Starting in setup mode.");
@@ -556,11 +655,15 @@ async fn run(
     }
 
     // Shared LLM manager (same API keys for all agents)
-    // This works even without keys; it will fail later at call time if no keys exist
+    // This works even without keys; it will fail later at call time if no keys exist.
+    // Loads OAuth credentials from auth.json if available.
     let llm_manager = Arc::new(
-        spacebot::llm::LlmManager::new(config.llm.clone())
-            .await
-            .with_context(|| "failed to initialize LLM manager")?,
+        spacebot::llm::LlmManager::with_instance_dir(
+            config.llm.clone(),
+            config.instance_dir.clone(),
+        )
+        .await
+        .with_context(|| "failed to initialize LLM manager")?,
     );
 
     // Shared embedding model (stateless, agent-agnostic)
@@ -804,6 +907,13 @@ async fn run(
                                         text: text.clone(),
                                     }).ok();
                                 }
+                                spacebot::OutboundResponse::RichMessage { text, .. } => {
+                                    api_event_tx.send(spacebot::api::ApiEvent::OutboundMessage {
+                                        agent_id: sse_agent_id.clone(),
+                                        channel_id: sse_channel_id.clone(),
+                                        text: text.clone(),
+                                    }).ok();
+                                }
                                 spacebot::OutboundResponse::ThreadReply { text, .. } => {
                                     api_event_tx.send(spacebot::api::ApiEvent::OutboundMessage {
                                         agent_id: sse_agent_id.clone(),
@@ -874,9 +984,17 @@ async fn run(
                     *active.latest_message.write().await = message.clone();
 
                     // Emit inbound message to SSE clients
+                    let sender_name = message.formatted_author.clone().or_else(|| {
+                        message
+                            .metadata
+                            .get("sender_display_name")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    });
                     api_state.event_tx.send(spacebot::api::ApiEvent::InboundMessage {
                         agent_id: agent_id.to_string(),
                         channel_id: conversation_id.clone(),
+                        sender_name,
                         sender_id: message.sender_id.clone(),
                         text: message.content.to_string(),
                     }).ok();
@@ -897,7 +1015,8 @@ async fn run(
             }
             Some(agent_id) = agent_remove_rx.recv() => {
                 let key: spacebot::AgentId = Arc::from(agent_id.as_str());
-                if agents.remove(&key).is_some() {
+                if let Some(agent) = agents.remove(&key) {
+                    agent.deps.mcp_manager.disconnect_all().await;
                     tracing::info!(agent_id = %agent_id, "removed agent from main loop");
                 } else {
                     tracing::warn!(agent_id = %agent_id, "agent not found in main loop for removal");
@@ -1003,6 +1122,7 @@ async fn run(
 
     for (agent_id, agent) in agents {
         tracing::info!(%agent_id, "shutting down agent");
+        agent.deps.mcp_manager.disconnect_all().await;
         agent.db.close().await;
     }
 
@@ -1010,10 +1130,10 @@ async fn run(
 
     // Flush buffered OTLP spans before the process exits. Without this the
     // batch exporter drops any spans recorded in the last export interval.
-    if let Some(provider) = otel_provider {
-        if let Err(error) = provider.shutdown() {
-            tracing::warn!(%error, "failed to flush OTel spans on shutdown");
-        }
+    if let Some(provider) = otel_provider
+        && let Err(error) = provider.shutdown()
+    {
+        tracing::warn!(%error, "failed to flush OTel spans on shutdown");
     }
 
     spacebot::daemon::cleanup(&paths);
@@ -1044,6 +1164,7 @@ async fn initialize_agents(
         String,
         std::path::PathBuf,
         Arc<spacebot::config::RuntimeConfig>,
+        Arc<spacebot::mcp::McpManager>,
     )>,
     discord_permissions: &mut Option<Arc<ArcSwap<spacebot::config::DiscordPermissions>>>,
     slack_permissions: &mut Option<Arc<ArcSwap<spacebot::config::SlackPermissions>>>,
@@ -1074,13 +1195,13 @@ async fn initialize_agents(
                 agent_config.archives_dir.display()
             )
         })?;
-        std::fs::create_dir_all(&agent_config.ingest_dir()).with_context(|| {
+        std::fs::create_dir_all(agent_config.ingest_dir()).with_context(|| {
             format!(
                 "failed to create ingest dir: {}",
                 agent_config.ingest_dir().display()
             )
         })?;
-        std::fs::create_dir_all(&agent_config.logs_dir()).with_context(|| {
+        std::fs::create_dir_all(agent_config.logs_dir()).with_context(|| {
             format!(
                 "failed to create logs dir: {}",
                 agent_config.logs_dir().display()
@@ -1132,6 +1253,8 @@ async fn initialize_agents(
         let (event_tx, _event_rx) = tokio::sync::broadcast::channel(256);
 
         let agent_id: spacebot::AgentId = Arc::from(agent_config.id.as_str());
+        let mcp_manager = Arc::new(spacebot::mcp::McpManager::new(agent_config.mcp.clone()));
+        mcp_manager.connect_all().await;
 
         // Scaffold identity templates if missing, then load
         spacebot::identity::scaffold_identity_files(&agent_config.workspace)
@@ -1169,6 +1292,7 @@ async fn initialize_agents(
             agent_config.id.clone(),
             agent_config.workspace.clone(),
             runtime_config.clone(),
+            mcp_manager.clone(),
         ));
 
         let deps = spacebot::AgentDeps {
@@ -1176,6 +1300,7 @@ async fn initialize_agents(
             memory_search,
             llm_manager: llm_manager.clone(),
             task_store: task_store.clone(),
+            mcp_manager,
             cron_tool: None,
             runtime_config,
             event_tx,
@@ -1202,6 +1327,7 @@ async fn initialize_agents(
         let mut agent_configs = Vec::new();
         let mut memory_searches = std::collections::HashMap::new();
         let mut task_stores = std::collections::HashMap::new();
+        let mut mcp_managers = std::collections::HashMap::new();
         let mut agent_workspaces = std::collections::HashMap::new();
         let mut runtime_configs = std::collections::HashMap::new();
         for (agent_id, agent) in agents.iter() {
@@ -1210,6 +1336,7 @@ async fn initialize_agents(
             agent_pools.insert(agent_id.to_string(), agent.db.sqlite.clone());
             memory_searches.insert(agent_id.to_string(), agent.deps.memory_search.clone());
             task_stores.insert(agent_id.to_string(), agent.deps.task_store.clone());
+            mcp_managers.insert(agent_id.to_string(), agent.deps.mcp_manager.clone());
             agent_workspaces.insert(agent_id.to_string(), agent.config.workspace.clone());
             runtime_configs.insert(agent_id.to_string(), agent.deps.runtime_config.clone());
             agent_configs.push(spacebot::api::AgentInfo {
@@ -1225,6 +1352,7 @@ async fn initialize_agents(
         api_state.set_agent_configs(agent_configs);
         api_state.set_memory_searches(memory_searches);
         api_state.set_task_stores(task_stores);
+        api_state.set_mcp_managers(mcp_managers);
         api_state.set_runtime_configs(runtime_configs);
         api_state.set_agent_workspaces(agent_workspaces);
         api_state.set_instance_dir(config.instance_dir.clone());
@@ -1243,16 +1371,16 @@ async fn initialize_agents(
         api_state.set_discord_permissions(perms.clone()).await;
     }
 
-    if let Some(discord_config) = &config.messaging.discord {
-        if discord_config.enabled {
-            let adapter = spacebot::messaging::discord::DiscordAdapter::new(
-                &discord_config.token,
-                discord_permissions
-                    .clone()
-                    .expect("discord permissions initialized when discord is enabled"),
-            );
-            new_messaging_manager.register(adapter).await;
-        }
+    if let Some(discord_config) = &config.messaging.discord
+        && discord_config.enabled
+    {
+        let adapter = spacebot::messaging::discord::DiscordAdapter::new(
+            &discord_config.token,
+            discord_permissions
+                .clone()
+                .expect("discord permissions initialized when discord is enabled"),
+        );
+        new_messaging_manager.register(adapter).await;
     }
 
     // Shared Slack permissions (hot-reloadable via file watcher)
@@ -1264,18 +1392,22 @@ async fn initialize_agents(
         api_state.set_slack_permissions(perms.clone()).await;
     }
 
-    if let Some(slack_config) = &config.messaging.slack {
-        if slack_config.enabled {
-            match spacebot::messaging::slack::SlackAdapter::new(
-                &slack_config.bot_token,
-                &slack_config.app_token,
-                slack_permissions
-                    .clone()
-                    .expect("slack permissions initialized when slack is enabled"),
-                slack_config.commands.clone(),
-            ) {
-                Ok(adapter) => { new_messaging_manager.register(adapter).await; }
-                Err(error) => { tracing::error!(%error, "failed to build slack adapter"); }
+    if let Some(slack_config) = &config.messaging.slack
+        && slack_config.enabled
+    {
+        match spacebot::messaging::slack::SlackAdapter::new(
+            &slack_config.bot_token,
+            &slack_config.app_token,
+            slack_permissions
+                .clone()
+                .expect("slack permissions initialized when slack is enabled"),
+            slack_config.commands.clone(),
+        ) {
+            Ok(adapter) => {
+                new_messaging_manager.register(adapter).await;
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to build slack adapter");
             }
         }
     }
@@ -1287,26 +1419,26 @@ async fn initialize_agents(
         Arc::new(ArcSwap::from_pointee(perms))
     });
 
-    if let Some(telegram_config) = &config.messaging.telegram {
-        if telegram_config.enabled {
-            let adapter = spacebot::messaging::telegram::TelegramAdapter::new(
-                &telegram_config.token,
-                telegram_permissions
-                    .clone()
-                    .expect("telegram permissions initialized when telegram is enabled"),
-            );
-            new_messaging_manager.register(adapter).await;
-        }
+    if let Some(telegram_config) = &config.messaging.telegram
+        && telegram_config.enabled
+    {
+        let adapter = spacebot::messaging::telegram::TelegramAdapter::new(
+            &telegram_config.token,
+            telegram_permissions
+                .clone()
+                .expect("telegram permissions initialized when telegram is enabled"),
+        );
+        new_messaging_manager.register(adapter).await;
     }
 
-    if let Some(webhook_config) = &config.messaging.webhook {
-        if webhook_config.enabled {
-            let adapter = spacebot::messaging::webhook::WebhookAdapter::new(
-                webhook_config.port,
-                &webhook_config.bind,
-            );
-            new_messaging_manager.register(adapter).await;
-        }
+    if let Some(webhook_config) = &config.messaging.webhook
+        && webhook_config.enabled
+    {
+        let adapter = spacebot::messaging::webhook::WebhookAdapter::new(
+            webhook_config.port,
+            &webhook_config.bind,
+        );
+        new_messaging_manager.register(adapter).await;
     }
 
     // Shared Twitch permissions (hot-reloadable via file watcher)
@@ -1316,23 +1448,25 @@ async fn initialize_agents(
         Arc::new(ArcSwap::from_pointee(perms))
     });
 
-    if let Some(twitch_config) = &config.messaging.twitch {
-        if twitch_config.enabled {
-            let adapter = spacebot::messaging::twitch::TwitchAdapter::new(
-                &twitch_config.username,
-                &twitch_config.oauth_token,
-                twitch_config.channels.clone(),
-                twitch_config.trigger_prefix.clone(),
-                twitch_permissions
-                    .clone()
-                    .expect("twitch permissions initialized when twitch is enabled"),
-            );
-            new_messaging_manager.register(adapter).await;
-        }
+    if let Some(twitch_config) = &config.messaging.twitch
+        && twitch_config.enabled
+    {
+        let adapter = spacebot::messaging::twitch::TwitchAdapter::new(
+            &twitch_config.username,
+            &twitch_config.oauth_token,
+            twitch_config.channels.clone(),
+            twitch_config.trigger_prefix.clone(),
+            twitch_permissions
+                .clone()
+                .expect("twitch permissions initialized when twitch is enabled"),
+        );
+        new_messaging_manager.register(adapter).await;
     }
 
     let webchat_adapter = Arc::new(spacebot::messaging::webchat::WebChatAdapter::new());
-    new_messaging_manager.register_shared(webchat_adapter.clone()).await;
+    new_messaging_manager
+        .register_shared(webchat_adapter.clone())
+        .await;
     api_state.set_webchat_adapter(webchat_adapter);
 
     *messaging_manager = Arc::new(new_messaging_manager);
@@ -1355,6 +1489,7 @@ async fn initialize_agents(
 
     for (agent_id, agent) in agents.iter_mut() {
         let store = Arc::new(spacebot::cron::CronStore::new(agent.db.sqlite.clone()));
+        agent.deps.messaging_manager = Some(messaging_manager.clone());
 
         // Seed cron jobs from config into the database
         for cron_def in &agent.config.cron {
@@ -1365,6 +1500,8 @@ async fn initialize_agents(
                 delivery_target: cron_def.delivery_target.clone(),
                 active_hours: cron_def.active_hours,
                 enabled: cron_def.enabled,
+                run_once: cron_def.run_once,
+                timeout_secs: cron_def.timeout_secs,
             };
             if let Err(error) = store.save(&cron_config).await {
                 tracing::warn!(
@@ -1409,7 +1546,6 @@ async fn initialize_agents(
         // Store cron tool on deps so each channel can register it on its own tool server
         let cron_tool = spacebot::tools::CronTool::new(store.clone(), scheduler.clone());
         agent.deps.cron_tool = Some(cron_tool);
-        agent.deps.messaging_manager = Some(messaging_manager.clone());
 
         cron_stores_map.insert(agent_id.to_string(), store);
         cron_schedulers_map.insert(agent_id.to_string(), scheduler.clone());
